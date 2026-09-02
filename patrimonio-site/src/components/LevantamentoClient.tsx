@@ -257,14 +257,22 @@ export default function LevantamentoClient({
     }
   }
 
-  function onFotoTomboSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onFotoTomboSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
     const arquivo = e.target.files?.[0];
     if (!arquivo) return;
-    setFotoTombo(arquivo);
-    setFotoTomboPreview(URL.createObjectURL(arquivo));
+    e.target.value = '';
+    // Comprime já na hora de tirar a foto (fotos de celular vêm com vários
+    // MB) — segurar várias fotos originais na memória ao mesmo tempo, sem
+    // isso, é o que costuma fazer o navegador travar com "insuficiência de
+    // memória" em aparelhos mais simples, principalmente depois de
+    // cadastrar vários itens seguidos na mesma sessão.
+    const comprimida = await comprimirImagem(arquivo);
+    if (fotoTomboPreview) URL.revokeObjectURL(fotoTomboPreview);
+    setFotoTombo(comprimida);
+    setFotoTomboPreview(URL.createObjectURL(comprimida));
     // Se a etiqueta não tem QR Code/código de barras (placas antigas, por
     // exemplo), tenta ler o número impresso automaticamente na foto.
-    if (!patrimonio) lerNumeroDaEtiqueta(arquivo);
+    if (!patrimonio) lerNumeroDaEtiqueta(comprimida);
   }
 
   /** Lê o número de patrimônio direto da foto da etiqueta, usando
@@ -308,18 +316,20 @@ export default function LevantamentoClient({
     }
   }
 
-  function onFotoItemSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onFotoItemSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
     const arquivo = e.target.files?.[0];
     if (!arquivo) return;
-    const eraPrimeiraFoto = fotosItem.length === 0;
-    setFotosItem((prev) => [...prev, arquivo]);
-    setFotosItemPreview((prev) => [...prev, URL.createObjectURL(arquivo)]);
     // limpa o input pra poder escolher/tirar outra foto em seguida
     e.target.value = '';
+    const eraPrimeiraFoto = fotosItem.length === 0;
+    // Comprime já ao tirar a foto — ver comentário em onFotoTomboSelecionada.
+    const comprimida = await comprimirImagem(arquivo);
+    setFotosItem((prev) => [...prev, comprimida]);
+    setFotosItemPreview((prev) => [...prev, URL.createObjectURL(comprimida)]);
     // Na primeira foto do item, tenta identificar automaticamente o que é
     // (tipo "Mesa de escritório"), igual você faz procurando no Google —
     // só sugere se ainda não tiver descrição digitada.
-    if (eraPrimeiraFoto && !descricao) identificarItemPelaFoto(arquivo);
+    if (eraPrimeiraFoto && !descricao) identificarItemPelaFoto(comprimida);
   }
 
   /** Manda a foto do item pra uma IA de visão identificar o tipo do
@@ -351,7 +361,11 @@ export default function LevantamentoClient({
 
   function removerFotoItem(indice: number) {
     setFotosItem((prev) => prev.filter((_, i) => i !== indice));
-    setFotosItemPreview((prev) => prev.filter((_, i) => i !== indice));
+    setFotosItemPreview((prev) => {
+      const removida = prev[indice];
+      if (removida) URL.revokeObjectURL(removida);
+      return prev.filter((_, i) => i !== indice);
+    });
   }
 
   /** Sobe as fotos (tombo + primeira foto do item) pro Storage do
@@ -368,22 +382,22 @@ export default function LevantamentoClient({
   }> {
     setEnviandoFotos(true);
     try {
-      const fotosComprimidas = await Promise.all(fotosItem.map((f) => comprimirImagem(f)));
-      const fotoTomboComprimida = fotoTombo ? await comprimirImagem(fotoTombo) : null;
-
+      // As fotos já foram comprimidas no momento em que foram tiradas (ver
+      // onFotoTomboSelecionada/onFotoItemSelecionada) — comprimir de novo
+      // aqui era trabalho em dobro e memória em dobro à toa.
       let fotoTomboUrl: string | null = null;
       let fotoItemUrl: string | null = null;
 
-      if (fotoTomboComprimida) {
-        fotoTomboUrl = await enviarFotoParaStorage(supabase, fotoTomboComprimida, `${patKey(patrimonio)}-tombo`);
+      if (fotoTombo) {
+        fotoTomboUrl = await enviarFotoParaStorage(supabase, fotoTombo, `${patKey(patrimonio)}-tombo`);
       }
-      if (fotosComprimidas[0]) {
-        fotoItemUrl = await enviarFotoParaStorage(supabase, fotosComprimidas[0], `${patKey(patrimonio)}-item`);
+      if (fotosItem[0]) {
+        fotoItemUrl = await enviarFotoParaStorage(supabase, fotosItem[0], `${patKey(patrimonio)}-item`);
       }
 
       let pdfBlob: Blob | null = null;
       try {
-        pdfBlob = await gerarFichaPdf(fotosComprimidas, fotoTomboComprimida, {
+        pdfBlob = await gerarFichaPdf(fotosItem, fotoTombo, {
           patrimonio,
           descricao,
           local,
@@ -470,6 +484,13 @@ export default function LevantamentoClient({
   }
 
   function limparFormulario() {
+    // Libera a memória das fotos dessa rodada antes de limpar — como você
+    // costuma cadastrar vários itens seguidos sem recarregar a página, sem
+    // isso as fotos anteriores continuariam ocupando memória escondidas,
+    // até o navegador reclamar de "insuficiência de memória".
+    if (fotoTomboPreview) URL.revokeObjectURL(fotoTomboPreview);
+    fotosItemPreview.forEach((url) => URL.revokeObjectURL(url));
+
     setPatrimonio('');
     setDescricao('');
     setTipoCodigo('Manual');
