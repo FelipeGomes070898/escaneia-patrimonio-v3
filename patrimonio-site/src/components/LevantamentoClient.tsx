@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { parseCodigo, formatPatrimonio, onlyDigits, patKey, linkDoSistema } from '@/lib/patrimonio';
+import { parseCodigo, formatPatrimonio, onlyDigits, patKey, linkDoSistema, DESCRICOES_RAPIDAS } from '@/lib/patrimonio';
 import type { SistemaDados } from '@/lib/govLookup';
 import { comprimirImagem } from '@/lib/imagem';
 import { gerarFichaPdf } from '@/lib/gerarFichaPdf';
@@ -51,6 +51,7 @@ export default function LevantamentoClient({
   const [verificandoDuplicado, setVerificandoDuplicado] = useState(false);
   const [permitirDuplicado, setPermitirDuplicado] = useState(false);
   const [ultimoPdf, setUltimoPdf] = useState<{ blob: Blob; nomeArquivo: string } | null>(null);
+  const [verDadosCompletos, setVerDadosCompletos] = useState(false);
 
   const scannerRef = useRef<any>(null);
   const readerId = 'reader';
@@ -81,9 +82,9 @@ export default function LevantamentoClient({
           /* ignora frames sem leitura */
         }
       );
-    } catch (e) {
+    } catch (e: any) {
       setEscaneando(false);
-      setMensagem({ tipo: 'erro', texto: 'Não foi possível abrir a câmera. Você pode digitar o número manualmente.' });
+      setMensagem({ tipo: 'erro', texto: mensagemErroCamera(e) });
     }
   }
 
@@ -417,6 +418,7 @@ export default function LevantamentoClient({
     setMensagemIdentificacao('');
     setDuplicado(null);
     setPermitirDuplicado(false);
+    setVerDadosCompletos(false);
   }
 
   async function salvar() {
@@ -518,17 +520,21 @@ export default function LevantamentoClient({
       <div className="bg-surface rounded-lg2 border border-border p-5">
         <h2 className="font-display font-bold text-base mb-3">1. Código do bem</h2>
 
-        {escaneando ? (
-          <div className="flex flex-col gap-3">
-            <div id={readerId} className="w-full rounded-md2 overflow-hidden bg-black aspect-video" />
-            <button
-              onClick={pararCamera}
-              className="w-full rounded-full border border-border py-2.5 text-sm font-semibold hover:bg-surface-2"
-            >
-              Cancelar câmera
-            </button>
-          </div>
-        ) : (
+        {/* O elemento do leitor precisa existir no HTML mesmo antes de abrir a
+            câmera — a biblioteca do scanner procura por ele assim que é
+            chamada, e se ele só aparecesse depois (via if/else) a câmera
+            falhava silenciosamente. Por isso ele fica sempre no DOM, só
+            escondido com CSS quando não está escaneando. */}
+        <div className={escaneando ? 'flex flex-col gap-3' : 'hidden'}>
+          <div id={readerId} className="w-full rounded-md2 overflow-hidden bg-black aspect-video" />
+          <button
+            onClick={pararCamera}
+            className="w-full rounded-full border border-border py-2.5 text-sm font-semibold hover:bg-surface-2"
+          >
+            Cancelar câmera
+          </button>
+        </div>
+        {!escaneando && (
           <button
             onClick={iniciarCamera}
             className="w-full rounded-full bg-accent text-white font-semibold py-2.5 text-sm mb-3"
@@ -598,46 +604,18 @@ export default function LevantamentoClient({
         </div>
       )}
 
-      {dadosGoverno && (
-        <div className="bg-surface rounded-lg2 border border-border p-5">
-          <h2 className="font-display font-bold text-base mb-3">Dados encontrados no sistema do governo</h2>
-
+      {dadosGoverno && (dadosGoverno.tombamentoAntigo || (dadosGoverno.disponivelBaixa && /sim/i.test(dadosGoverno.disponivelBaixa))) && (
+        <div className="flex flex-col gap-2">
           {dadosGoverno.tombamentoAntigo && (
-            <p className="text-xs bg-surface-2 rounded-md2 px-3 py-2 mb-3">
+            <p className="text-xs bg-surface-2 rounded-md2 px-3 py-2">
               ℹ Este bem tem um tombamento antigo associado: <strong>{dadosGoverno.tombamentoAntigo}</strong>.
               {dadosGoverno.tombamento && <> O tombamento atual é <strong>{dadosGoverno.tombamento}</strong>.</>}
             </p>
           )}
           {dadosGoverno.disponivelBaixa && /sim/i.test(dadosGoverno.disponivelBaixa) && (
-            <p className="text-xs text-warn bg-warn/10 rounded-md2 px-3 py-2 mb-3">
+            <p className="text-xs text-warn bg-warn/10 rounded-md2 px-3 py-2">
               ⚠ Este bem está marcado como <strong>disponível para baixa</strong> no sistema do governo — pode estar
               desativado ou obsoleto.
-            </p>
-          )}
-
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            {Object.entries(dadosGoverno)
-              .filter(([k]) => k !== 'descricao')
-              .map(([k, v]) => (
-                <div key={k} className="col-span-2 sm:col-span-1">
-                  <dt className="text-xs text-muted uppercase tracking-wide">{rotuloCampo(k)}</dt>
-                  <dd className="font-semibold break-words">{String(v)}</dd>
-                  {k === 'departamento' && String(v).trim().toLowerCase() !== local.trim().toLowerCase() && (
-                    <button
-                      onClick={usarDepartamentoComoLocal}
-                      className="mt-1 text-xs font-semibold text-accent-strong hover:underline"
-                    >
-                      Usar como local do levantamento →
-                    </button>
-                  )}
-                </div>
-              ))}
-          </dl>
-          {dadosGoverno.departamento && (
-            <p className="text-xs text-muted mt-3">
-              "Departamento" é onde esse bem está registrado no sistema do governo — pode ser diferente de onde você
-              encontrou o item agora. O "Local" abaixo é sempre o que vale pro levantamento; os dois ficam guardados
-              separados na planilha.
             </p>
           )}
         </div>
@@ -648,46 +626,64 @@ export default function LevantamentoClient({
 
         <div>
           <label className="text-xs font-semibold text-muted">Descrição</label>
+          <div className="flex flex-wrap gap-2 mt-1 mb-2">
+            {DESCRICOES_RAPIDAS.map((d) => (
+              <button
+                key={d}
+                type="button"
+                onClick={() => setDescricao(d)}
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold whitespace-nowrap ${
+                  descricao === d ? 'bg-accent text-white border-accent' : 'border-border hover:bg-surface-2'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
           <input
             type="text"
             value={descricao}
             onChange={(e) => setDescricao(e.target.value)}
-            placeholder="Ex: Cadeira giratória"
-            className="mt-1 w-full rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+            placeholder="Ex: Cadeira giratória (ou toque em um botão acima)"
+            className="w-full rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
           />
         </div>
 
         <div>
           <label className="text-xs font-semibold text-muted">Local</label>
-          {!mostrarNovaSala ? (
-            <div className="flex gap-2 mt-1">
-              <select
-                value={local}
-                onChange={(e) => setLocal(e.target.value)}
-                className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent bg-surface"
-              >
-                {salas.length === 0 && <option value="">Nenhuma sala cadastrada</option>}
-                {salas.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
+          <div className="flex flex-wrap gap-2 mt-1">
+            {salas.map((s) => (
               <button
-                onClick={() => setMostrarNovaSala(true)}
-                className="rounded-md2 border border-border px-3 py-2 text-sm font-semibold hover:bg-surface-2 whitespace-nowrap"
+                key={s}
+                type="button"
+                onClick={() => setLocal(s)}
+                className={`rounded-full border px-3 py-1.5 text-xs font-semibold whitespace-nowrap ${
+                  local === s ? 'bg-accent text-white border-accent' : 'border-border hover:bg-surface-2'
+                }`}
               >
-                + Novo local
+                {s}
               </button>
-            </div>
-          ) : (
-            <div className="flex gap-2 mt-1">
+            ))}
+            <button
+              type="button"
+              onClick={() => setMostrarNovaSala((v) => !v)}
+              className="rounded-full border border-dashed border-border px-3 py-1.5 text-xs font-semibold hover:bg-surface-2 whitespace-nowrap"
+            >
+              + Novo local
+            </button>
+          </div>
+          {salas.length === 0 && !mostrarNovaSala && (
+            <p className="text-xs text-muted mt-1">Nenhum local cadastrado ainda — toque em "+ Novo local".</p>
+          )}
+          {mostrarNovaSala && (
+            <div className="flex gap-2 mt-2">
               <input
                 type="text"
                 value={novaSala}
                 onChange={(e) => setNovaSala(e.target.value)}
                 placeholder="Nome do novo local"
                 className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+                autoFocus
               />
               <button
                 onClick={adicionarSala}
@@ -702,6 +698,14 @@ export default function LevantamentoClient({
                 Cancelar
               </button>
             </div>
+          )}
+          {dadosGoverno?.departamento && dadosGoverno.departamento.trim().toLowerCase() !== local.trim().toLowerCase() && (
+            <button
+              onClick={usarDepartamentoComoLocal}
+              className="mt-1 text-xs font-semibold text-accent-strong hover:underline"
+            >
+              Usar "{dadosGoverno.departamento}" (do e-Estado) como local →
+            </button>
           )}
         </div>
 
@@ -767,8 +771,61 @@ export default function LevantamentoClient({
           {enviandoFotos ? 'Gerando ficha em PDF…' : salvando ? 'Salvando…' : 'Salvar item'}
         </button>
       )}
+
+      {dadosGoverno && (
+        <div className="bg-surface rounded-lg2 border border-border p-5">
+          <button
+            onClick={() => setVerDadosCompletos((v) => !v)}
+            className="w-full flex items-center justify-between text-left font-display font-bold text-sm text-muted"
+          >
+            <span>Dados completos encontrados no e-Estado</span>
+            <span>{verDadosCompletos ? '▲' : '▼'}</span>
+          </button>
+          {verDadosCompletos && (
+            <>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm mt-3">
+                {Object.entries(dadosGoverno)
+                  .filter(([k]) => k !== 'descricao')
+                  .map(([k, v]) => (
+                    <div key={k} className="col-span-2 sm:col-span-1">
+                      <dt className="text-xs text-muted uppercase tracking-wide">{rotuloCampo(k)}</dt>
+                      <dd className="font-semibold break-words">{String(v)}</dd>
+                    </div>
+                  ))}
+              </dl>
+              {dadosGoverno.departamento && (
+                <p className="text-xs text-muted mt-3">
+                  "Departamento" é onde esse bem está registrado no sistema do governo — pode ser diferente de onde
+                  você encontrou o item agora. O "Local" lá em cima é sempre o que vale pro levantamento; os dois
+                  ficam guardados separados na planilha.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
+}
+
+/** Traduz o erro da câmera pra uma explicação que a pessoa consegue agir —
+ *  "não foi possível abrir a câmera" sozinho não ajuda ninguém a resolver. */
+function mensagemErroCamera(e: any): string {
+  const nome = e?.name || '';
+  const texto = String(e?.message || e || '').toLowerCase();
+  if (nome === 'NotAllowedError' || texto.includes('permission')) {
+    return 'O celular bloqueou o acesso à câmera pra esse site. Toque no cadeado/ícone ao lado do endereço no navegador, procure "Câmera" e mude pra "Permitir", depois toque em "Abrir câmera" de novo. Enquanto isso, dá pra digitar o número do patrimônio manualmente.';
+  }
+  if (nome === 'NotFoundError' || texto.includes('no camera') || texto.includes('not found')) {
+    return 'Não encontramos nenhuma câmera nesse aparelho/navegador. Digite o número do patrimônio manualmente.';
+  }
+  if (nome === 'NotReadableError' || texto.includes('in use') || texto.includes('could not start')) {
+    return 'A câmera parece estar sendo usada por outro aplicativo (ou outra aba). Feche o outro app/aba e toque em "Abrir câmera" de novo, ou digite o número manualmente.';
+  }
+  if (nome === 'SecurityError' || texto.includes('secure')) {
+    return 'O navegador bloqueou a câmera porque a conexão não é considerada segura. Confirme que o endereço começa com "https://" e tente de novo.';
+  }
+  return 'Não foi possível abrir a câmera (' + (nome || 'erro desconhecido') + '). Você pode digitar o número do patrimônio manualmente, ou tentar de novo depois de verificar se o site tem permissão de câmera nas configurações do navegador.';
 }
 
 function formatarDataHora(iso: string) {

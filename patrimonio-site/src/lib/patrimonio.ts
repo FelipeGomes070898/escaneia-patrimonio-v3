@@ -27,6 +27,14 @@ export function formatPatrimonio(digits: string): string {
   return groups.join('.');
 }
 
+/** Botões de toque rápido pra descrição — mesma lista de itens comuns do
+ *  app antigo (PWA), pra não precisar digitar na maioria dos casos: um
+ *  toque já preenche a descrição e segue pro próximo passo. */
+export const DESCRICOES_RAPIDAS = [
+  'Cadeira', 'Mesa', 'Monitor', 'Computador', 'Teclado', 'Mouse',
+  'Impressora', 'Armário', 'Ventilador', 'Ar-condicionado', 'Bebedouro', 'Estante'
+];
+
 const DESCRICAO_KEYWORDS = [
   'CADEIRA', 'MESA', 'MONITOR', 'COMPUTADOR', 'CPU', 'NOTEBOOK', 'IMPRESSORA',
   'ARMARIO', 'ARMÁRIO', 'VENTILADOR', 'CONDICIONADO', 'TELEVISOR', 'TV',
