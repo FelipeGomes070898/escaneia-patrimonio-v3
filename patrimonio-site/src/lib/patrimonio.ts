@@ -43,6 +43,79 @@ const DESCRICAO_KEYWORDS = [
   'BALCAO', 'BALCÃO', 'SOFA', 'SOFÁ', 'LONGARINA', 'ARQUIVO'
 ];
 
+/** As etiquetas mais novas do governo trazem, além do QR Code, uma
+ *  "Desc. analítica" impressa (ex: "VENTILADOR DE PAREDE 60CM NEW AMA") —
+ *  bem mais específica que só adivinhar por palavra-chave. Essa mesma
+ *  descrição normalmente também está dentro do próprio QR Code (o texto
+ *  lido pela câmera), então dá pra aproveitar na hora, sem nem precisar
+ *  esperar a busca no site do governo terminar. Etiquetas mais antigas
+ *  podem não ter essa informação — nesse caso simplesmente não acha nada
+ *  aqui e o sistema cai pro palpite por palavra-chave (ou pra busca no
+ *  governo, ou pra digitação manual mesmo).
+ */
+const ROTULO_DESCRICAO_ANALITICA = /desc(?:ri[cç][aã]o)?\.?\s*anal[ií]tica\.?\s*:?\s*/i;
+
+/** Rótulos que costumam vir DEPOIS da descrição analítica na etiqueta —
+ *  usados só pra saber onde cortar o texto capturado, caso o resto dos
+ *  campos venha grudado sem quebra de linha. */
+const PROXIMOS_ROTULOS = [
+  'patrim', 'tombamento', 'lote', 'tipo', 'classifica', 'estado de conserv',
+  'situa', 'dispon', 'setor', 'unidade', 'departamento', 'respons',
+  'data de', 'forma de ingresso', 'valor de aquis', 'valor residual', 'vida útil', 'vida util'
+];
+
+function cortarNoProximoRotulo(texto: string): string {
+  const baixo = texto.toLowerCase();
+  let corte = texto.length;
+  for (const rotulo of PROXIMOS_ROTULOS) {
+    const idx = baixo.indexOf(rotulo);
+    if (idx > 0 && idx < corte) corte = idx;
+  }
+  return texto.slice(0, corte).trim();
+}
+
+/** Preposições/artigos curtos que NÃO devem ser tratados como sigla — sem
+ *  isso "DE"/"DA"/"DO" ficariam maiúsculos no meio da frase. */
+const PALAVRINHAS_MINUSCULAS = new Set(['DE', 'DA', 'DO', 'DAS', 'DOS', 'E', 'EM', 'NO', 'NA', 'COM', 'PARA', 'PRA', 'A', 'O']);
+
+/** Deixa um texto todo em maiúsculas (comum nas etiquetas impressas) mais
+ *  legível, mas preserva siglas curtas (AMA, TV, CPU...) em maiúsculo. */
+function legibilizarDescricao(texto: string): string {
+  const limpo = texto.trim().replace(/\s+/g, ' ').replace(/[.,;:]+$/, '');
+  if (!limpo) return '';
+  if (limpo !== limpo.toUpperCase()) return limpo; // já não está tudo em caixa alta
+  return limpo
+    .split(' ')
+    .map((palavra, i) => {
+      const soLetras = palavra.replace(/[^A-ZÀ-Ü]/gi, '');
+      if (PALAVRINHAS_MINUSCULAS.has(soLetras.toUpperCase())) {
+        return i === 0 ? palavra.charAt(0) + palavra.slice(1).toLowerCase() : palavra.toLowerCase();
+      }
+      if (soLetras.length > 0 && soLetras.length <= 3) return palavra; // sigla, mantém
+      return palavra.charAt(0) + palavra.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
+/** Procura uma "Desc. analítica" dentro do texto lido do QR Code/etiqueta.
+ *  Retorna a descrição já formatada, ou vazio se essa etiqueta não tiver
+ *  esse campo (etiquetas antigas, por exemplo). */
+function extrairDescricaoAnalitica(raw: string): string {
+  const linhas = raw.split(/\r?\n/);
+  for (let i = 0; i < linhas.length; i++) {
+    const m = linhas[i].match(ROTULO_DESCRICAO_ANALITICA);
+    if (m) {
+      let resto = linhas[i].slice((m.index || 0) + m[0].length);
+      // Se a etiqueta não tiver quebra de linha real, o resto do texto
+      // (patrimônio, lote etc.) pode ter vindo colado na mesma linha.
+      if (!resto.trim() && linhas[i + 1]) resto = linhas[i + 1];
+      const cortado = cortarNoProximoRotulo(resto);
+      if (cortado) return legibilizarDescricao(cortado);
+    }
+  }
+  return '';
+}
+
 export interface CodigoParseado {
   tipo: string;
   valorBruto: string;
@@ -77,9 +150,18 @@ export function parseCodigo(raw: string, formatName: string): CodigoParseado {
     }
   }
 
-  const upper = raw.toUpperCase();
-  const found = DESCRICAO_KEYWORDS.find((k) => upper.includes(k));
-  if (found) result.descricaoSugerida = found.charAt(0) + found.slice(1).toLowerCase();
+  // Prioridade 1: a descrição analítica impressa/lida na etiqueta (ex:
+  // "Ventilador de parede 60cm New Ama") — bem mais específica.
+  const analitica = extrairDescricaoAnalitica(raw);
+  if (analitica) {
+    result.descricaoSugerida = analitica;
+  } else {
+    // Prioridade 2 (etiquetas sem esse campo): só um palpite genérico por
+    // palavra-chave (ex: "Ventilador").
+    const upper = raw.toUpperCase();
+    const found = DESCRICAO_KEYWORDS.find((k) => upper.includes(k));
+    if (found) result.descricaoSugerida = found.charAt(0) + found.slice(1).toLowerCase();
+  }
 
   return result;
 }
