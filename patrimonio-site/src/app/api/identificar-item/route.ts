@@ -36,5 +36,9 @@ export async function POST(request: NextRequest) {
 
   const buffer = Buffer.from(await arquivo.arrayBuffer());
   const descricaoSugerida = await identificarItemNaFoto(buffer.toString('base64'));
-  return NextResponse.json({ descricaoSugerida });
+  // Avisa o front-end se a chave nem está configurada, pra ele poder
+  // mostrar isso claramente em vez de simplesmente "não sugeriu nada" — o
+  // administrador (ou quem estiver testando) precisa saber que falta
+  // configurar a GEMINI_API_KEY, e não achar que a IA "não funcionou".
+  return NextResponse.json({ descricaoSugerida, iaConfigurada: !!process.env.GEMINI_API_KEY });
 }

@@ -59,6 +59,8 @@ export default function LevantamentoClient({
 
   const scannerRef = useRef<any>(null);
   const readerId = 'reader';
+  const [lanternaDisponivel, setLanternaDisponivel] = useState(false);
+  const [lanternaLigada, setLanternaLigada] = useState(false);
 
   useEffect(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -118,13 +120,41 @@ export default function LevantamentoClient({
   async function iniciarCamera() {
     setMensagem(null);
     try {
-      const { Html5Qrcode } = await import('html5-qrcode');
-      const instancia = new Html5Qrcode(readerId);
+      const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import('html5-qrcode');
+      const instancia = new Html5Qrcode(readerId, {
+        // Só os formatos que aparecem nas etiquetas (QR Code e os
+        // códigos de barra usados pelo governo) — checar menos formatos
+        // por quadro deixa a leitura mais rápida.
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.QR_CODE,
+          Html5QrcodeSupportedFormats.CODE_128,
+          Html5QrcodeSupportedFormats.CODE_39,
+          Html5QrcodeSupportedFormats.EAN_13
+        ],
+        // Usa o leitor nativo do próprio Android quando o aparelho tem
+        // (bem mais rápido e enxerga o código de mais longe/ângulo do
+        // que o leitor em JavaScript usado como alternativa).
+        useBarCodeDetectorIfSupported: true,
+        verbose: false
+      });
       scannerRef.current = instancia;
       setEscaneando(true);
+      setLanternaDisponivel(false);
+      setLanternaLigada(false);
       await instancia.start(
-        { facingMode: 'environment' },
-        { fps: 10, qrbox: { width: 260, height: 180 } },
+        // Pede a câmera numa resolução maior — com uma imagem mais nítida,
+        // o código é lido de mais longe e mais rápido.
+        { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+        {
+          fps: 15,
+          // Sem uma caixinha pequena obrigando a centralizar o código —
+          // agora a leitura funciona em qualquer parte da tela, então não
+          // precisa mais chegar perto nem alinhar certinho.
+          qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
+            const lado = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.9);
+            return { width: lado, height: lado };
+          }
+        },
         (decodedText: string, result: any) => {
           const formatName = result?.result?.format?.formatName || 'QR_CODE';
           aplicarCodigoLido(decodedText, formatName);
@@ -134,9 +164,30 @@ export default function LevantamentoClient({
           /* ignora frames sem leitura */
         }
       );
+      // Se o aparelho tiver lanterna, mostra o botão pra ligar — ajuda
+      // muito a ler etiquetas em lugar escuro (embaixo de móveis, depósito).
+      try {
+        const capacidades: any = instancia.getRunningTrackCapabilities?.();
+        setLanternaDisponivel(!!capacidades?.torch);
+      } catch {
+        setLanternaDisponivel(false);
+      }
     } catch (e: any) {
       setEscaneando(false);
       setMensagem({ tipo: 'erro', texto: mensagemErroCamera(e) });
+    }
+  }
+
+  /** Liga/desliga a lanterna do celular durante o escaneamento — só
+   *  aparece quando o aparelho tem essa capacidade. */
+  async function alternarLanterna() {
+    const instancia = scannerRef.current;
+    if (!instancia) return;
+    try {
+      await instancia.applyVideoConstraints({ advanced: [{ torch: !lanternaLigada }] });
+      setLanternaLigada((atual) => !atual);
+    } catch {
+      /* aparelho não deixou — sem problema, o botão só não faz efeito */
     }
   }
 
@@ -152,6 +203,8 @@ export default function LevantamentoClient({
       scannerRef.current = null;
     }
     setEscaneando(false);
+    setLanternaDisponivel(false);
+    setLanternaLigada(false);
   }
 
   function aplicarCodigoLido(raw: string, formatName: string) {
@@ -345,7 +398,7 @@ export default function LevantamentoClient({
    *  trava o cadastro nem esconde o campo pra digitar manualmente. */
   async function identificarItemPelaFoto(arquivo: File) {
     setIdentificandoItem(true);
-    setMensagemIdentificacao('Identificando o item na foto…');
+    setMensagemIdentificacao('Identificando o item na foto com a IA do Google…');
     try {
       const comprimida = await comprimirImagem(arquivo, 900, 0.75);
       const form = new FormData();
@@ -354,7 +407,12 @@ export default function LevantamentoClient({
       const json = await resp.json();
       if (resp.ok && json.descricaoSugerida) {
         setDescricao((atual) => atual || json.descricaoSugerida);
-        setMensagemIdentificacao(`Sugestão automática pela foto: "${json.descricaoSugerida}". Confira e ajuste se precisar.`);
+        setMensagemIdentificacao(`Sugestão automática pela foto (Google IA): "${json.descricaoSugerida}". Confira e ajuste se precisar.`);
+      } else if (resp.ok && json.iaConfigurada === false) {
+        // Não é "a foto não deu pra identificar" — é que ninguém configurou
+        // a chave da IA ainda. Avisa isso claramente em vez de ficar calado,
+        // pra quem administra o sistema saber exatamente o que falta.
+        setMensagemIdentificacao('A identificação automática por IA (Google) ainda não foi configurada nesse site — veja o arquivo GUIA-IDENTIFICACAO-FOTO.md pra ativar. Por enquanto, digite a descrição normalmente.');
       } else {
         setMensagemIdentificacao('');
       }
@@ -639,12 +697,24 @@ export default function LevantamentoClient({
             escondido com CSS quando não está escaneando. */}
         <div className={escaneando ? 'flex flex-col gap-3' : 'hidden'}>
           <div id={readerId} className="w-full rounded-md2 overflow-hidden bg-black aspect-video" />
-          <button
-            onClick={pararCamera}
-            className="w-full rounded-full border border-border py-2.5 text-sm font-semibold hover:bg-surface-2"
-          >
-            Cancelar câmera
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={pararCamera}
+              className="flex-1 rounded-full border border-border py-2.5 text-sm font-semibold hover:bg-surface-2"
+            >
+              Cancelar câmera
+            </button>
+            {lanternaDisponivel && (
+              <button
+                onClick={alternarLanterna}
+                className={`rounded-full px-5 py-2.5 text-sm font-semibold whitespace-nowrap ${
+                  lanternaLigada ? 'bg-accent text-white' : 'border border-border hover:bg-surface-2'
+                }`}
+              >
+                {lanternaLigada ? '💡 Lanterna ligada' : '💡 Lanterna'}
+              </button>
+            )}
+          </div>
         </div>
         {!escaneando && (
           <>
@@ -857,10 +927,12 @@ export default function LevantamentoClient({
         <div>
           <label className="text-xs font-semibold text-muted">Foto do item (opcional, mas recomendado)</label>
           <p className="text-xs text-muted mt-0.5 mb-2">
-            Tire uma ou mais fotos do bem inteiro. Ao salvar, as fotos ficam guardadas no sistema (e já entram na
-            planilha exportada em Relatórios, junto com a foto da etiqueta se você tirou uma lá em cima) e uma ficha
-            em PDF é gerada na hora — você pode baixar ou compartilhar no WhatsApp logo depois de salvar, e passar
-            pro Google Drive quando quiser.
+            Tire uma ou mais fotos do bem inteiro — a primeira foto é analisada automaticamente pela IA do Google
+            (o mesmo tipo de identificação de "tirar print e perguntar pro Google"), que tenta preencher a
+            Descrição sozinha. Ao salvar, as fotos ficam guardadas no sistema (e já entram na planilha exportada em
+            Relatórios, junto com a foto da etiqueta se você tirou uma lá em cima) e uma ficha em PDF é gerada na
+            hora — você pode baixar ou compartilhar no WhatsApp logo depois de salvar, e passar pro Google Drive
+            quando quiser.
           </p>
 
           <div className="flex flex-wrap items-center gap-3">
