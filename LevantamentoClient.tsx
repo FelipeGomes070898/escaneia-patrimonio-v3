@@ -45,6 +45,10 @@ export default function LevantamentoClient({
   const [mensagemLeitura, setMensagemLeitura] = useState('');
   const [identificandoItem, setIdentificandoItem] = useState(false);
   const [mensagemIdentificacao, setMensagemIdentificacao] = useState('');
+  const [mensagemDescricaoEtiqueta, setMensagemDescricaoEtiqueta] = useState('');
+  const [ditando, setDitando] = useState(false);
+  const [suportaDitado, setSuportaDitado] = useState(false);
+  const reconhecimentoRef = useRef<any>(null);
   const [salvando, setSalvando] = useState(false);
   const [mensagem, setMensagem] = useState<{ tipo: 'ok' | 'erro'; texto: string } | null>(null);
   const [duplicado, setDuplicado] = useState<RegistroExistente | null>(null);
@@ -57,11 +61,59 @@ export default function LevantamentoClient({
   const readerId = 'reader';
 
   useEffect(() => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    setSuportaDitado(!!SR);
     return () => {
       pararCamera();
+      try {
+        reconhecimentoRef.current?.stop();
+      } catch {
+        /* já parado */
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Liga/desliga o ditado por voz da Descrição — útil pra digitar menos
+   *  no celular, principalmente com uma mão só segurando o item. Usa o
+   *  reconhecimento de voz do próprio navegador (não precisa de nenhuma
+   *  chave configurada), então só funciona nos navegadores que suportam
+   *  isso (Chrome no Android funciona bem; se não suportar, o botão nem
+   *  aparece e dá pra digitar normalmente). */
+  function alternarDitado() {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+
+    if (ditando) {
+      reconhecimentoRef.current?.stop();
+      return;
+    }
+
+    const reconhecimento = new SR();
+    reconhecimento.lang = 'pt-BR';
+    reconhecimento.interimResults = false;
+    reconhecimento.maxAlternatives = 1;
+
+    reconhecimento.onstart = () => setDitando(true);
+    reconhecimento.onend = () => setDitando(false);
+    reconhecimento.onerror = (e: any) => {
+      setDitando(false);
+      if (e?.error === 'not-allowed' || e?.error === 'service-not-allowed') {
+        setMensagem({ tipo: 'erro', texto: 'O navegador bloqueou o microfone. Toque no cadeado ao lado do endereço, libere o microfone e tente de novo.' });
+      } else if (e?.error !== 'no-speech' && e?.error !== 'aborted') {
+        setMensagem({ tipo: 'erro', texto: 'Não foi possível reconhecer o áudio. Tente de novo ou digite manualmente.' });
+      }
+    };
+    reconhecimento.onresult = (e: any) => {
+      const texto = e.results?.[0]?.[0]?.transcript?.trim();
+      if (texto) {
+        setDescricao((atual) => (atual ? `${atual} ${texto}` : texto));
+      }
+    };
+
+    reconhecimentoRef.current = reconhecimento;
+    reconhecimento.start();
+  }
 
   async function iniciarCamera() {
     setMensagem(null);
@@ -82,9 +134,9 @@ export default function LevantamentoClient({
           /* ignora frames sem leitura */
         }
       );
-    } catch (e) {
+    } catch (e: any) {
       setEscaneando(false);
-      setMensagem({ tipo: 'erro', texto: 'Não foi possível abrir a câmera. Você pode digitar o número manualmente.' });
+      setMensagem({ tipo: 'erro', texto: mensagemErroCamera(e) });
     }
   }
 
@@ -106,7 +158,10 @@ export default function LevantamentoClient({
     const parsed = parseCodigo(raw, formatName);
     setTipoCodigo(parsed.tipo);
     if (parsed.patrimonio) setPatrimonio(parsed.patrimonio);
-    if (parsed.descricaoSugerida && !descricao) setDescricao(parsed.descricaoSugerida);
+    if (parsed.descricaoSugerida && !descricao) {
+      setDescricao(parsed.descricaoSugerida);
+      setMensagemDescricaoEtiqueta(`Descrição preenchida automaticamente pela etiqueta: "${parsed.descricaoSugerida}". Confira e ajuste se precisar.`);
+    }
     const numero = parsed.patrimonio || onlyDigits(raw);
     if (numero) {
       buscarNoGoverno(numero);
@@ -160,7 +215,13 @@ export default function LevantamentoClient({
       if (error) throw error;
 
       if (pdfBlob) {
-        setUltimoPdf({ blob: pdfBlob, nomeArquivo: `${patKey(patrimonio)} - ${descricao || 'item'}.pdf` });
+        const nomeArquivo = `${patKey(patrimonio)} - ${descricao || 'item'}.pdf`;
+        setUltimoPdf({ blob: pdfBlob, nomeArquivo });
+        // Tenta abrir o compartilhamento sozinho, sem esperar toque no
+        // botão — economiza um passo quando o navegador permite. Se não
+        // der (ou a pessoa cancelar), o botão "Compartilhar" continua ali
+        // pronto pra tentar de novo manualmente.
+        tentarCompartilhar({ blob: pdfBlob, nomeArquivo }, resumoParaCompartilhar(nomeArquivo));
       }
 
       setMensagem({ tipo: 'ok', texto: `Registro do patrimônio ${patrimonio} atualizado!` });
@@ -202,14 +263,22 @@ export default function LevantamentoClient({
     }
   }
 
-  function onFotoTomboSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onFotoTomboSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
     const arquivo = e.target.files?.[0];
     if (!arquivo) return;
-    setFotoTombo(arquivo);
-    setFotoTomboPreview(URL.createObjectURL(arquivo));
+    e.target.value = '';
+    // Comprime já na hora de tirar a foto (fotos de celular vêm com vários
+    // MB) — segurar várias fotos originais na memória ao mesmo tempo, sem
+    // isso, é o que costuma fazer o navegador travar com "insuficiência de
+    // memória" em aparelhos mais simples, principalmente depois de
+    // cadastrar vários itens seguidos na mesma sessão.
+    const comprimida = await comprimirImagem(arquivo);
+    if (fotoTomboPreview) URL.revokeObjectURL(fotoTomboPreview);
+    setFotoTombo(comprimida);
+    setFotoTomboPreview(URL.createObjectURL(comprimida));
     // Se a etiqueta não tem QR Code/código de barras (placas antigas, por
     // exemplo), tenta ler o número impresso automaticamente na foto.
-    if (!patrimonio) lerNumeroDaEtiqueta(arquivo);
+    if (!patrimonio) lerNumeroDaEtiqueta(comprimida);
   }
 
   /** Lê o número de patrimônio direto da foto da etiqueta, usando
@@ -226,11 +295,21 @@ export default function LevantamentoClient({
       } = await worker.recognize(arquivo);
       await worker.terminate();
 
-      const parsed = parseCodigo((text || '').replace(/\s+/g, ''), 'OCR');
+      const textoLido = text || '';
+      // Pro número, remove espaços (OCR às vezes separa os dígitos sem
+      // querer). Pra descrição analítica, mantém os espaços/linhas — eles
+      // são o que ajuda a achar onde o campo começa e termina.
+      const parsed = parseCodigo(textoLido.replace(/\s+/g, ''), 'OCR');
+      const parsedDescricao = parseCodigo(textoLido, 'OCR');
       if (parsed.patrimonio) {
         setTipoCodigo('Foto (leitura automática)');
         setPatrimonio(parsed.patrimonio);
-        setMensagemLeitura(`Número lido automaticamente: ${parsed.patrimonio}. Confira se está certo antes de salvar.`);
+        let msg = `Número lido automaticamente: ${parsed.patrimonio}. Confira se está certo antes de salvar.`;
+        if (parsedDescricao.descricaoSugerida && !descricao) {
+          setDescricao(parsedDescricao.descricaoSugerida);
+          msg += ` Descrição também preenchida pela etiqueta: "${parsedDescricao.descricaoSugerida}".`;
+        }
+        setMensagemLeitura(msg);
         buscarNoGoverno(parsed.patrimonio);
         checarDuplicado(parsed.patrimonio);
       } else {
@@ -243,18 +322,20 @@ export default function LevantamentoClient({
     }
   }
 
-  function onFotoItemSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onFotoItemSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
     const arquivo = e.target.files?.[0];
     if (!arquivo) return;
-    const eraPrimeiraFoto = fotosItem.length === 0;
-    setFotosItem((prev) => [...prev, arquivo]);
-    setFotosItemPreview((prev) => [...prev, URL.createObjectURL(arquivo)]);
     // limpa o input pra poder escolher/tirar outra foto em seguida
     e.target.value = '';
+    const eraPrimeiraFoto = fotosItem.length === 0;
+    // Comprime já ao tirar a foto — ver comentário em onFotoTomboSelecionada.
+    const comprimida = await comprimirImagem(arquivo);
+    setFotosItem((prev) => [...prev, comprimida]);
+    setFotosItemPreview((prev) => [...prev, URL.createObjectURL(comprimida)]);
     // Na primeira foto do item, tenta identificar automaticamente o que é
     // (tipo "Mesa de escritório"), igual você faz procurando no Google —
     // só sugere se ainda não tiver descrição digitada.
-    if (eraPrimeiraFoto && !descricao) identificarItemPelaFoto(arquivo);
+    if (eraPrimeiraFoto && !descricao) identificarItemPelaFoto(comprimida);
   }
 
   /** Manda a foto do item pra uma IA de visão identificar o tipo do
@@ -286,7 +367,11 @@ export default function LevantamentoClient({
 
   function removerFotoItem(indice: number) {
     setFotosItem((prev) => prev.filter((_, i) => i !== indice));
-    setFotosItemPreview((prev) => prev.filter((_, i) => i !== indice));
+    setFotosItemPreview((prev) => {
+      const removida = prev[indice];
+      if (removida) URL.revokeObjectURL(removida);
+      return prev.filter((_, i) => i !== indice);
+    });
   }
 
   /** Sobe as fotos (tombo + primeira foto do item) pro Storage do
@@ -303,22 +388,22 @@ export default function LevantamentoClient({
   }> {
     setEnviandoFotos(true);
     try {
-      const fotosComprimidas = await Promise.all(fotosItem.map((f) => comprimirImagem(f)));
-      const fotoTomboComprimida = fotoTombo ? await comprimirImagem(fotoTombo) : null;
-
+      // As fotos já foram comprimidas no momento em que foram tiradas (ver
+      // onFotoTomboSelecionada/onFotoItemSelecionada) — comprimir de novo
+      // aqui era trabalho em dobro e memória em dobro à toa.
       let fotoTomboUrl: string | null = null;
       let fotoItemUrl: string | null = null;
 
-      if (fotoTomboComprimida) {
-        fotoTomboUrl = await enviarFotoParaStorage(supabase, fotoTomboComprimida, `${patKey(patrimonio)}-tombo`);
+      if (fotoTombo) {
+        fotoTomboUrl = await enviarFotoParaStorage(supabase, fotoTombo, `${patKey(patrimonio)}-tombo`);
       }
-      if (fotosComprimidas[0]) {
-        fotoItemUrl = await enviarFotoParaStorage(supabase, fotosComprimidas[0], `${patKey(patrimonio)}-item`);
+      if (fotosItem[0]) {
+        fotoItemUrl = await enviarFotoParaStorage(supabase, fotosItem[0], `${patKey(patrimonio)}-item`);
       }
 
       let pdfBlob: Blob | null = null;
       try {
-        pdfBlob = await gerarFichaPdf(fotosComprimidas, fotoTomboComprimida, {
+        pdfBlob = await gerarFichaPdf(fotosItem, fotoTombo, {
           patrimonio,
           descricao,
           local,
@@ -349,31 +434,44 @@ export default function LevantamentoClient({
     URL.revokeObjectURL(url);
   }
 
-  /** Abre o compartilhamento do celular (WhatsApp aparece como opção,
-   *  inclusive pra grupos) com a ficha em PDF anexada. Não existe um
-   *  jeito de mandar direto pra um grupo específico sem interação —
-   *  isso a pessoa escolhe na hora. No computador (sem suporte a anexar
-   *  arquivo por aqui), abre o WhatsApp Web com um texto avisando pra
-   *  anexar o PDF baixado manualmente. */
+  function resumoParaCompartilhar(nomeArquivo: string) {
+    return `Escaneia Patrimônio\nPatrimônio: ${patrimonio}\nDescrição: ${descricao || '-'}\nLocal: ${local}\nCadastrado por: ${nomeUsuario}\nFicha em anexo: ${nomeArquivo}`;
+  }
+
+  /** Tenta abrir a caixa de compartilhamento nativa do celular (WhatsApp
+   *  aparece como opção ali, inclusive pra grupos) com a ficha em PDF já
+   *  anexada. Devolve true se conseguiu abrir, ou false se o
+   *  aparelho/navegador não suporta ou bloqueou — por exemplo, quando é
+   *  chamada automaticamente e não sobrou "permissão" de toque recente
+   *  suficiente pro navegador liberar. Não existe um jeito de escolher o
+   *  grupo/contato sozinho por segurança — isso a pessoa sempre escolhe
+   *  na hora, é o próprio WhatsApp/Android que decide essa etapa. */
+  async function tentarCompartilhar(pdf: { blob: Blob; nomeArquivo: string }, resumo: string): Promise<boolean> {
+    if (typeof navigator === 'undefined') return false;
+    const arquivo = new File([pdf.blob], pdf.nomeArquivo, { type: 'application/pdf' });
+    if (!(navigator as any).canShare?.({ files: [arquivo] })) return false;
+    try {
+      await (navigator as any).share({ files: [arquivo], title: 'Escaneia Patrimônio', text: resumo });
+      return true;
+    } catch {
+      return false; // cancelou, ou o navegador bloqueou — sem problema, os botões continuam ali
+    }
+  }
+
+  /** Botão manual "Compartilhar ficha no WhatsApp" — se o compartilhamento
+   *  nativo não rolar (computador, ou navegador sem suporte), cai pro
+   *  WhatsApp Web com o texto pronto; nesse caso a pessoa precisa anexar o
+   *  PDF baixado à mão, porque link do WhatsApp não aceita anexo. */
   async function compartilharNoWhatsapp() {
     if (!ultimoPdf) return;
-    const arquivo = new File([ultimoPdf.blob], ultimoPdf.nomeArquivo, { type: 'application/pdf' });
-    const resumo = `Escaneia Patrimônio\nPatrimônio: ${patrimonio}\nDescrição: ${descricao || '-'}\nLocal: ${local}\nCadastrado por: ${nomeUsuario}\nFicha em anexo: ${ultimoPdf.nomeArquivo}`;
-
-    if (typeof navigator !== 'undefined' && (navigator as any).canShare?.({ files: [arquivo] })) {
-      try {
-        await (navigator as any).share({ files: [arquivo], title: 'Escaneia Patrimônio', text: resumo });
-        return;
-      } catch {
-        /* usuário cancelou o compartilhamento — sem problema */
-        return;
-      }
+    const resumo = resumoParaCompartilhar(ultimoPdf.nomeArquivo);
+    const conseguiu = await tentarCompartilhar(ultimoPdf, resumo);
+    if (!conseguiu) {
+      const url = `https://wa.me/?text=${encodeURIComponent(
+        resumo + '\n\n(Baixe a ficha em "Baixar ficha em PDF" e anexe manualmente aqui no WhatsApp.)'
+      )}`;
+      window.open(url, '_blank');
     }
-
-    const url = `https://wa.me/?text=${encodeURIComponent(
-      resumo + '\n\n(Baixe a ficha em "Baixar ficha em PDF" e anexe manualmente aqui no WhatsApp.)'
-    )}`;
-    window.open(url, '_blank');
   }
 
   function definirLocal(nome: string) {
@@ -405,6 +503,13 @@ export default function LevantamentoClient({
   }
 
   function limparFormulario() {
+    // Libera a memória das fotos dessa rodada antes de limpar — como você
+    // costuma cadastrar vários itens seguidos sem recarregar a página, sem
+    // isso as fotos anteriores continuariam ocupando memória escondidas,
+    // até o navegador reclamar de "insuficiência de memória".
+    if (fotoTomboPreview) URL.revokeObjectURL(fotoTomboPreview);
+    fotosItemPreview.forEach((url) => URL.revokeObjectURL(url));
+
     setPatrimonio('');
     setDescricao('');
     setTipoCodigo('Manual');
@@ -416,6 +521,7 @@ export default function LevantamentoClient({
     setFotosItemPreview([]);
     setMensagemLeitura('');
     setMensagemIdentificacao('');
+    setMensagemDescricaoEtiqueta('');
     setDuplicado(null);
     setPermitirDuplicado(false);
     setVerDadosCompletos(false);
@@ -471,7 +577,13 @@ export default function LevantamentoClient({
       if (error) throw error;
 
       if (pdfBlob) {
-        setUltimoPdf({ blob: pdfBlob, nomeArquivo: `${patKey(patrimonio)} - ${descricao || 'item'}.pdf` });
+        const nomeArquivo = `${patKey(patrimonio)} - ${descricao || 'item'}.pdf`;
+        setUltimoPdf({ blob: pdfBlob, nomeArquivo });
+        // Tenta abrir o compartilhamento sozinho, sem esperar toque no
+        // botão — economiza um passo quando o navegador permite. Se não
+        // der (ou a pessoa cancelar), o botão "Compartilhar" continua ali
+        // pronto pra tentar de novo manualmente.
+        tentarCompartilhar({ blob: pdfBlob, nomeArquivo }, resumoParaCompartilhar(nomeArquivo));
       }
 
       setMensagem({ tipo: 'ok', texto: `Patrimônio ${patrimonio} salvo com sucesso!` });
@@ -520,23 +632,43 @@ export default function LevantamentoClient({
       <div className="bg-surface rounded-lg2 border border-border p-5">
         <h2 className="font-display font-bold text-base mb-3">1. Código do bem</h2>
 
-        {escaneando ? (
-          <div className="flex flex-col gap-3">
-            <div id={readerId} className="w-full rounded-md2 overflow-hidden bg-black aspect-video" />
-            <button
-              onClick={pararCamera}
-              className="w-full rounded-full border border-border py-2.5 text-sm font-semibold hover:bg-surface-2"
-            >
-              Cancelar câmera
-            </button>
-          </div>
-        ) : (
+        {/* O elemento do leitor precisa existir no HTML mesmo antes de abrir a
+            câmera — a biblioteca do scanner procura por ele assim que é
+            chamada, e se ele só aparecesse depois (via if/else) a câmera
+            falhava silenciosamente. Por isso ele fica sempre no DOM, só
+            escondido com CSS quando não está escaneando. */}
+        <div className={escaneando ? 'flex flex-col gap-3' : 'hidden'}>
+          <div id={readerId} className="w-full rounded-md2 overflow-hidden bg-black aspect-video" />
           <button
-            onClick={iniciarCamera}
-            className="w-full rounded-full bg-accent text-white font-semibold py-2.5 text-sm mb-3"
+            onClick={pararCamera}
+            className="w-full rounded-full border border-border py-2.5 text-sm font-semibold hover:bg-surface-2"
           >
-            Abrir câmera e escanear
+            Cancelar câmera
           </button>
+        </div>
+        {!escaneando && (
+          <>
+            <button
+              onClick={iniciarCamera}
+              className="w-full rounded-full bg-accent text-white font-semibold py-2.5 text-sm mb-3"
+            >
+              Abrir câmera e escanear
+            </button>
+
+            <div className="flex items-center gap-3">
+              {fotoTomboPreview && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={fotoTomboPreview} alt="Prévia da etiqueta" className="w-14 h-14 rounded-md2 object-cover border border-border flex-shrink-0" />
+              )}
+              <label className="flex-1 rounded-md2 border border-dashed border-border px-4 py-2.5 text-sm font-semibold hover:bg-surface-2 cursor-pointer text-center">
+                {fotoTomboPreview ? 'Trocar foto da etiqueta' : 'Sem QR Code, ou a câmera não está lendo? Tire uma foto da etiqueta'}
+                <input type="file" accept="image/*" capture="environment" onChange={onFotoTomboSelecionada} className="hidden" />
+              </label>
+            </div>
+            {(lendoEtiqueta || mensagemLeitura) && (
+              <p className={`text-xs mt-2 ${lendoEtiqueta ? 'text-muted' : 'text-accent-strong'}`}>{mensagemLeitura}</p>
+            )}
+          </>
         )}
 
         <div className="mt-3">
@@ -636,13 +768,30 @@ export default function LevantamentoClient({
               </button>
             ))}
           </div>
-          <input
-            type="text"
-            value={descricao}
-            onChange={(e) => setDescricao(e.target.value)}
-            placeholder="Ex: Cadeira giratória (ou toque em um botão acima)"
-            className="w-full rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
-          />
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={descricao}
+              onChange={(e) => setDescricao(e.target.value)}
+              placeholder="Ex: Cadeira giratória (ou toque em um botão acima)"
+              className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+            />
+            {suportaDitado && (
+              <button
+                type="button"
+                onClick={alternarDitado}
+                title={ditando ? 'Parar de ouvir' : 'Falar a descrição'}
+                className={`rounded-md2 border px-3 py-2 text-sm font-semibold whitespace-nowrap ${
+                  ditando ? 'bg-danger text-white border-danger animate-pulse' : 'border-border hover:bg-surface-2'
+                }`}
+              >
+                {ditando ? '⏹ Ouvindo…' : '🎤 Falar'}
+              </button>
+            )}
+          </div>
+          {mensagemDescricaoEtiqueta && (
+            <p className="text-xs text-accent-strong mt-1">{mensagemDescricaoEtiqueta}</p>
+          )}
         </div>
 
         <div>
@@ -706,51 +855,33 @@ export default function LevantamentoClient({
         </div>
 
         <div>
-          <label className="text-xs font-semibold text-muted">Fotos (opcional, mas recomendado)</label>
+          <label className="text-xs font-semibold text-muted">Foto do item (opcional, mas recomendado)</label>
           <p className="text-xs text-muted mt-0.5 mb-2">
-            Tire uma foto da etiqueta do tombamento e uma ou mais fotos do bem inteiro. Ao salvar, as fotos ficam
-            guardadas no sistema (e já entram na planilha exportada em Relatórios) e uma ficha em PDF é gerada na
-            hora — você pode baixar ou compartilhar no WhatsApp logo depois de salvar, e passar pro Google Drive
-            quando quiser.
+            Tire uma ou mais fotos do bem inteiro. Ao salvar, as fotos ficam guardadas no sistema (e já entram na
+            planilha exportada em Relatórios, junto com a foto da etiqueta se você tirou uma lá em cima) e uma ficha
+            em PDF é gerada na hora — você pode baixar ou compartilhar no WhatsApp logo depois de salvar, e passar
+            pro Google Drive quando quiser.
           </p>
 
-          <div className="flex flex-col gap-4">
-            <div className="flex items-center gap-3">
-              {fotoTomboPreview && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={fotoTomboPreview} alt="Prévia da etiqueta" className="w-16 h-16 rounded-md2 object-cover border border-border" />
-              )}
-              <label className="rounded-md2 border border-border px-4 py-2 text-sm font-semibold hover:bg-surface-2 cursor-pointer">
-                {fotoTomboPreview ? 'Trocar foto do tombo' : 'Foto do tombo (etiqueta)'}
-                <input type="file" accept="image/*" capture="environment" onChange={onFotoTomboSelecionada} className="hidden" />
-              </label>
-            </div>
-
-            <div>
-              <div className="flex flex-wrap items-center gap-3">
-                {fotosItemPreview.map((src, i) => (
-                  <div key={i} className="relative">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={src} alt={`Foto do item ${i + 1}`} className="w-16 h-16 rounded-md2 object-cover border border-border" />
-                    <button
-                      onClick={() => removerFotoItem(i)}
-                      className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-danger text-white text-xs font-bold flex items-center justify-center"
-                      aria-label="Remover foto"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-                <label className="rounded-md2 border border-border px-4 py-2 text-sm font-semibold hover:bg-surface-2 cursor-pointer">
-                  {fotosItemPreview.length ? '+ Outra foto do item' : 'Foto do item (o bem inteiro)'}
-                  <input type="file" accept="image/*" capture="environment" onChange={onFotoItemSelecionada} className="hidden" />
-                </label>
+          <div className="flex flex-wrap items-center gap-3">
+            {fotosItemPreview.map((src, i) => (
+              <div key={i} className="relative">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={src} alt={`Foto do item ${i + 1}`} className="w-16 h-16 rounded-md2 object-cover border border-border" />
+                <button
+                  onClick={() => removerFotoItem(i)}
+                  className="absolute -top-2 -right-2 w-5 h-5 rounded-full bg-danger text-white text-xs font-bold flex items-center justify-center"
+                  aria-label="Remover foto"
+                >
+                  ×
+                </button>
               </div>
-            </div>
+            ))}
+            <label className="rounded-md2 border border-border px-4 py-2 text-sm font-semibold hover:bg-surface-2 cursor-pointer">
+              {fotosItemPreview.length ? '+ Outra foto do item' : 'Foto do item (o bem inteiro)'}
+              <input type="file" accept="image/*" capture="environment" onChange={onFotoItemSelecionada} className="hidden" />
+            </label>
           </div>
-          {(lendoEtiqueta || mensagemLeitura) && (
-            <p className={`text-xs mt-2 ${lendoEtiqueta ? 'text-muted' : 'text-accent-strong'}`}>{mensagemLeitura}</p>
-          )}
           {(identificandoItem || mensagemIdentificacao) && (
             <p className={`text-xs mt-2 ${identificandoItem ? 'text-muted' : 'text-accent-strong'}`}>{mensagemIdentificacao}</p>
           )}
@@ -802,6 +933,26 @@ export default function LevantamentoClient({
       )}
     </div>
   );
+}
+
+/** Traduz o erro da câmera pra uma explicação que a pessoa consegue agir —
+ *  "não foi possível abrir a câmera" sozinho não ajuda ninguém a resolver. */
+function mensagemErroCamera(e: any): string {
+  const nome = e?.name || '';
+  const texto = String(e?.message || e || '').toLowerCase();
+  if (nome === 'NotAllowedError' || texto.includes('permission')) {
+    return 'O celular bloqueou o acesso à câmera pra esse site. Toque no cadeado/ícone ao lado do endereço no navegador, procure "Câmera" e mude pra "Permitir", depois toque em "Abrir câmera" de novo. Enquanto isso, dá pra digitar o número do patrimônio manualmente.';
+  }
+  if (nome === 'NotFoundError' || texto.includes('no camera') || texto.includes('not found')) {
+    return 'Não encontramos nenhuma câmera nesse aparelho/navegador. Digite o número do patrimônio manualmente.';
+  }
+  if (nome === 'NotReadableError' || texto.includes('in use') || texto.includes('could not start')) {
+    return 'A câmera parece estar sendo usada por outro aplicativo (ou outra aba). Feche o outro app/aba e toque em "Abrir câmera" de novo, ou digite o número manualmente.';
+  }
+  if (nome === 'SecurityError' || texto.includes('secure')) {
+    return 'O navegador bloqueou a câmera porque a conexão não é considerada segura. Confirme que o endereço começa com "https://" e tente de novo.';
+  }
+  return 'Não foi possível abrir a câmera (' + (nome || 'erro desconhecido') + '). Você pode digitar o número do patrimônio manualmente, ou tentar de novo depois de verificar se o site tem permissão de câmera nas configurações do navegador.';
 }
 
 function formatarDataHora(iso: string) {
