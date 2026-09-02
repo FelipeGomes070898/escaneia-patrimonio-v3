@@ -13,6 +13,7 @@ interface RegistroPlanilha {
   descricao: string | null;
   local: string | null;
   departamento_governo: string | null;
+  foto_item_url: string | null;
   foto_item_drive_id: string | null;
   criado_por_nome: string | null;
   criado_em: string;
@@ -40,7 +41,7 @@ export async function GET(request: NextRequest) {
 
   const { data: todos } = await supabase
     .from('patrimonio_registros')
-    .select('id, patrimonio, patrimonio_key, descricao, local, departamento_governo, foto_item_drive_id, criado_por_nome, criado_em')
+    .select('id, patrimonio, patrimonio_key, descricao, local, departamento_governo, foto_item_url, foto_item_drive_id, criado_por_nome, criado_em')
     .order('criado_em', { ascending: false });
 
   const registros = (todos || []) as RegistroPlanilha[];
@@ -115,19 +116,34 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    if (r.foto_item_drive_id) {
+    // A foto pode estar guardada no Storage do Supabase (fluxo atual, mais
+    // rápido) ou, em registros antigos, no Google Drive — tenta os dois,
+    // mas nunca trava a planilha se uma foto específica não carregar.
+    let buffer: Buffer | null = null;
+    if (r.foto_item_url) {
       try {
-        const buffer = await baixarArquivoDrive(r.foto_item_drive_id);
-        const imageId = workbook.addImage({ buffer: buffer as any, extension: 'jpeg' });
-        const linhaIndex = linha.number - 1; // addImage usa índice 0-based
-        planilha.addImage(imageId, {
-          tl: { col: 3.05, row: linhaIndex + 0.05 },
-          ext: { width: 90, height: 78 }
-        });
+        const resp = await fetch(r.foto_item_url);
+        if (resp.ok) buffer = Buffer.from(await resp.arrayBuffer());
       } catch {
-        // se a foto não puder ser baixada (removida do Drive, etc.), deixa a célula em branco
-        linha.getCell('foto').value = 'foto indisponível';
+        buffer = null;
       }
+    } else if (r.foto_item_drive_id) {
+      try {
+        buffer = await baixarArquivoDrive(r.foto_item_drive_id);
+      } catch {
+        buffer = null;
+      }
+    }
+
+    if (buffer) {
+      const imageId = workbook.addImage({ buffer: buffer as any, extension: 'jpeg' });
+      const linhaIndex = linha.number - 1; // addImage usa índice 0-based
+      planilha.addImage(imageId, {
+        tl: { col: 3.05, row: linhaIndex + 0.05 },
+        ext: { width: 90, height: 78 }
+      });
+    } else if (r.foto_item_url || r.foto_item_drive_id) {
+      linha.getCell('foto').value = 'foto indisponível';
     }
   }
 

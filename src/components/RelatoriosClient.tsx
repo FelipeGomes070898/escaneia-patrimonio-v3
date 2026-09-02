@@ -12,6 +12,8 @@ interface Registro {
   criado_por_nome: string | null;
   link: string;
   documento_pdf_url: string | null;
+  foto_item_url: string | null;
+  foto_tombo_url: string | null;
 }
 
 export default function RelatoriosClient({ registros, locais }: { registros: Registro[]; locais: string[] }) {
@@ -175,13 +177,19 @@ export default function RelatoriosClient({ registros, locais }: { registros: Reg
                   <td className="px-4 py-3">{r.criado_por_nome || '—'}</td>
                   <td className="px-4 py-3 text-muted">{formatarData(r.criado_em)}</td>
                   <td className="px-4 py-3 whitespace-nowrap">
-                    {r.documento_pdf_url ? (
-                      <a href={r.documento_pdf_url} target="_blank" rel="noreferrer" className="text-accent font-semibold text-xs hover:underline">
-                        Ver PDF
-                      </a>
-                    ) : (
-                      <span className="text-muted text-xs">—</span>
-                    )}
+                    <div className="flex gap-2 flex-wrap">
+                      {r.foto_item_url && (
+                        <a href={r.foto_item_url} target="_blank" rel="noreferrer" className="text-accent font-semibold text-xs hover:underline">
+                          Ver foto
+                        </a>
+                      )}
+                      {r.documento_pdf_url && (
+                        <a href={r.documento_pdf_url} target="_blank" rel="noreferrer" className="text-accent font-semibold text-xs hover:underline">
+                          Ver PDF
+                        </a>
+                      )}
+                      {!r.foto_item_url && !r.documento_pdf_url && <span className="text-muted text-xs">—</span>}
+                    </div>
                   </td>
                 </tr>
               );
