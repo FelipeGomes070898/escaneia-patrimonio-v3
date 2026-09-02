@@ -7,9 +7,9 @@ Este é o passo a passo pra colocar o site novo no ar. Ele usa o **mesmo projeto
 1. Entre no [supabase.com](https://supabase.com), abra o projeto.
 2. Vá em **SQL Editor** → **New query**.
 3. Abra o arquivo `schema-v2.sql` (nesta pasta), copie **todo** o conteúdo, cole e clique em **Run**. Deve aparecer "Success".
-4. Repita o mesmo, em ordem, com `schema-v3.sql`, `schema-v4.sql`, `schema-v5.sql` e `schema-v6.sql` — cada um numa query nova.
+4. Repita o mesmo, em ordem, com `schema-v3.sql`, `schema-v4.sql`, `schema-v5.sql`, `schema-v6.sql` e `schema-v7.sql` — cada um numa query nova.
 
-O `schema-v3.sql` traz o sistema de permissões (gestor / recrutador / colaborador). O `schema-v4.sql` e o `schema-v5.sql` adicionam as colunas da ficha em PDF que vai pro Google Drive. O `schema-v6.sql` adiciona as colunas usadas na planilha de regularização (explicado mais abaixo). Nenhum desses scripts apaga nada, nem do Escaneia Patrimônio nem do Radar de Investimentos.
+O `schema-v3.sql` traz o sistema de permissões (gestor / recrutador / colaborador). O `schema-v4.sql` e o `schema-v5.sql` adicionam colunas de fotos/ficha. O `schema-v6.sql` adiciona as colunas usadas na planilha de regularização (explicado mais abaixo). O `schema-v7.sql` cria o espaço de armazenamento (bucket) onde as fotos ficam guardadas dentro do próprio Supabase — necessário pra salvar fotos funcionar. Nenhum desses scripts apaga nada, nem do Escaneia Patrimônio nem do Radar de Investimentos.
 
 ## 2. Ativar login por e-mail (se ainda não estiver)
 
@@ -98,15 +98,18 @@ A busca no sistema do governo aceita tanto o tombamento **atual** quanto um **an
 - Se o tombamento **não for encontrado** no sistema do governo, o site avisa claramente ("não encontramos esse tombamento...").
 - Se o bem tiver um **tombamento antigo** registrado, ou estiver marcado como **disponível para baixa** (pode estar desativado), o site mostra esse aviso destacado junto dos dados.
 
-## Ficha em PDF no Google Drive e compartilhamento
+## Fotos, ficha em PDF e compartilhamento
 
-O levantamento agora pede a foto da etiqueta do tombamento e **uma ou mais fotos do bem** (dá pra tirar quantas quiser, de ângulos diferentes, e remover alguma antes de salvar). Ao clicar em **Salvar item**, o site monta automaticamente uma ficha em PDF — uma página por foto do item, uma da etiqueta, e uma última página com todos os dados do registro (inclusive os do sistema do governo, quando encontrados) — e sobe esse PDF pra pasta do local no Google Drive da equipe. É o mesmo formato que você já vinha guardando manualmente lá.
+O levantamento pede a foto da etiqueta do tombamento e **uma ou mais fotos do bem** (dá pra tirar quantas quiser, de ângulos diferentes, e remover alguma antes de salvar). Ao clicar em **Salvar item**, as fotos são guardadas direto no sistema (rápido, sem precisar de nenhuma configuração extra) e o site monta na hora, no próprio navegador, uma ficha em PDF — uma página por foto do item, uma da etiqueta, e uma última página com todos os dados do registro (inclusive os do sistema do governo, quando encontrados).
 
-Depois de salvar, aparece um botão **"Compartilhar ficha no WhatsApp"**: no celular, ele abre a tela de compartilhamento normal do Android/iPhone com o PDF pronto pra enviar — o WhatsApp aparece como uma das opções, e você escolhe o grupo ou pessoa na hora. Não existe um jeito de mandar automaticamente pra um grupo específico sem essa escolha manual (o WhatsApp não permite isso de fora do próprio app), mas o compartilhamento fica a um toque de distância. No computador, o botão abre o WhatsApp Web com uma mensagem pronta e o link do PDF.
+Depois de salvar, aparecem dois botões:
 
-O passo a passo pra ligar o Google Drive está no arquivo `GUIA-GOOGLE-DRIVE.md`.
+- **"Baixar ficha em PDF"** — baixa o arquivo direto no celular/computador. Dali, se quiser, é só arrastar pro Google Drive (ou pra onde preferir) manualmente, do jeito que você já fazia antes.
+- **"Compartilhar ficha no WhatsApp"** — no celular, abre a tela de compartilhamento normal do Android/iPhone com o PDF pronto pra enviar; o WhatsApp aparece como uma das opções, e você escolhe o grupo ou pessoa na hora. No computador, abre o WhatsApp Web com uma mensagem avisando pra anexar o PDF baixado.
 
-Nos Relatórios, cada item tem um link **"Ver PDF"** que abre a ficha completa direto no Drive.
+Isso significa que o Google Drive **não é mais necessário** pro cadastro funcionar — o guia `GUIA-GOOGLE-DRIVE.md` continua existindo caso você queira automatizar o envio pra lá no futuro, mas por enquanto o fluxo é: o sistema guarda tudo (inclusive as fotos, que já aparecem na planilha exportada em Relatórios), e você decide quando e o que levar pro Drive.
+
+Nos Relatórios, cada item tem links **"Ver foto"** (a foto do bem, guardada no sistema) e, se houver, **"Ver PDF"** — o link do PDF só aparece pra registros antigos, cadastrados quando o site ainda subia a ficha pro Drive automaticamente.
 
 ## Planilha de regularização (igual a que você já usava)
 

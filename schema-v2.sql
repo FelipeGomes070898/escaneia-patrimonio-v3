@@ -1,3 +1,9 @@
+-- Escaneia Patrimônio — atualização do schema (site novo em Next.js)
+-- Só ADICIONA coisas: não apaga nem altera nada do Radar de Investimentos,
+-- nem apaga dados já salvos em patrimonio_registros. Pode rodar com
+-- segurança quantas vezes quiser (tudo usa "if not exists" / "on conflict").
+
+-- 1) Perfis: nome de cada pessoa da equipe, ligado ao login (auth.users)
 create table if not exists patrimonio_perfis (
   id uuid primary key references auth.users(id) on delete cascade,
   nome text,
@@ -15,6 +21,7 @@ drop policy if exists "patrimonio_perfis_update_own" on patrimonio_perfis;
 create policy "patrimonio_perfis_update_own" on patrimonio_perfis
   for update to authenticated using (auth.uid() = id);
 
+-- Cria o perfil automaticamente quando alguém se cadastra
 create or replace function public.handle_new_patrimonio_user()
 returns trigger as $$
 begin
@@ -30,30 +37,17 @@ create trigger on_auth_user_created_patrimonio
   after insert on auth.users
   for each row execute procedure public.handle_new_patrimonio_user();
 
+-- Preenche perfis de quem já tinha conta antes dessa tabela existir
 insert into patrimonio_perfis (id, nome, email)
 select id, coalesce(raw_user_meta_data->>'nome', split_part(email, '@', 1)), email
 from auth.users
 on conflict (id) do nothing;
 
-create table if not exists patrimonio_registros (
-  id uuid primary key default gen_random_uuid(),
-  tipo text,
-  patrimonio text,
-  patrimonio_key text,
-  descricao text,
-  local text,
-  link text,
-  dispositivo text,
-  foto_url text,
-  criado_em timestamptz not null default now(),
-  atualizado_em timestamptz,
-  user_id uuid references auth.users(id),
-  criado_por_nome text
-);
-
+-- 2) Quem cadastrou cada bem (pra tela de Usuários/relatórios)
 alter table patrimonio_registros add column if not exists user_id uuid references auth.users(id);
 alter table patrimonio_registros add column if not exists criado_por_nome text;
 
+-- 3) Lista de salas/locais configurável (em vez de fixa no código)
 create table if not exists patrimonio_salas (
   id uuid primary key default gen_random_uuid(),
   nome text not null unique,
@@ -78,8 +72,10 @@ drop policy if exists "patrimonio_salas_delete" on patrimonio_salas;
 create policy "patrimonio_salas_delete" on patrimonio_salas
   for delete to authenticated using (true);
 
-alter table patrimonio_registros enable row level security;
-
+-- 4) Agora que existe login de verdade, troca as regras de acesso de
+--    patrimonio_registros e das fotos: só pra quem está logado (a
+--    equipe toda continua vendo os mesmos dados, só não fica mais aberto
+--    pra qualquer pessoa da internet sem login).
 drop policy if exists "patrimonio_registros_select" on patrimonio_registros;
 drop policy if exists "patrimonio_registros_insert" on patrimonio_registros;
 drop policy if exists "patrimonio_registros_update" on patrimonio_registros;
@@ -93,3 +89,17 @@ create policy "patrimonio_registros_update" on patrimonio_registros
   for update to authenticated using (true);
 create policy "patrimonio_registros_delete" on patrimonio_registros
   for delete to authenticated using (true);
+
+drop policy if exists "patrimonio_fotos_select" on storage.objects;
+drop policy if exists "patrimonio_fotos_insert" on storage.objects;
+drop policy if exists "patrimonio_fotos_update" on storage.objects;
+drop policy if exists "patrimonio_fotos_delete" on storage.objects;
+
+create policy "patrimonio_fotos_select" on storage.objects
+  for select to authenticated using (bucket_id = 'patrimonio-fotos');
+create policy "patrimonio_fotos_insert" on storage.objects
+  for insert to authenticated with check (bucket_id = 'patrimonio-fotos');
+create policy "patrimonio_fotos_update" on storage.objects
+  for update to authenticated using (bucket_id = 'patrimonio-fotos');
+create policy "patrimonio_fotos_delete" on storage.objects
+  for delete to authenticated using (bucket_id = 'patrimonio-fotos');
