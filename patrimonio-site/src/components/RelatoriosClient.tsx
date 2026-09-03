@@ -14,6 +14,18 @@ interface Registro {
   documento_pdf_url: string | null;
   foto_item_url: string | null;
   foto_tombo_url: string | null;
+  sem_tombo?: boolean;
+  medida_largura_cm?: number | null;
+  medida_altura_cm?: number | null;
+  medida_profundidade_cm?: number | null;
+}
+
+function textoMedidas(r: Registro): string {
+  const partes: string[] = [];
+  if (r.medida_largura_cm) partes.push(`${r.medida_largura_cm}`);
+  if (r.medida_altura_cm) partes.push(`${r.medida_altura_cm}`);
+  if (r.medida_profundidade_cm) partes.push(`${r.medida_profundidade_cm}`);
+  return partes.length ? partes.join(' × ') + ' cm' : '';
 }
 
 export default function RelatoriosClient({ registros, locais }: { registros: Registro[]; locais: string[] }) {
@@ -77,11 +89,12 @@ export default function RelatoriosClient({ registros, locais }: { registros: Reg
   }
 
   function exportarCsv() {
-    const cabecalho = ['Patrimônio', 'Descrição', 'Local', 'Cadastrado por', 'Data', 'Link'];
+    const cabecalho = ['Patrimônio', 'Descrição', 'Local', 'Medidas (L×A×P)', 'Cadastrado por', 'Data', 'Link'];
     const linhas = filtrados.map((r) => [
       r.patrimonio,
       r.descricao || '',
       r.local || '',
+      textoMedidas(r),
       r.criado_por_nome || '',
       formatarData(r.criado_em),
       r.link || ''
@@ -169,10 +182,13 @@ export default function RelatoriosClient({ registros, locais }: { registros: Reg
               return (
                 <tr key={r.id} className={`border-b border-border last:border-0 ${duplicado ? 'bg-warn/10' : ''}`}>
                   <td className="px-4 py-3 font-mono">
-                    {r.patrimonio}
-                    {duplicado && <span title="Tombamento cadastrado mais de uma vez" className="ml-1.5 text-warn">⚠</span>}
+                    {r.sem_tombo ? <span className="text-muted italic">Sem etiqueta</span> : r.patrimonio}
+                    {duplicado && !r.sem_tombo && <span title="Tombamento cadastrado mais de uma vez" className="ml-1.5 text-warn">⚠</span>}
                   </td>
-                  <td className="px-4 py-3">{r.descricao || '—'}</td>
+                  <td className="px-4 py-3">
+                    {r.descricao || '—'}
+                    {textoMedidas(r) && <span className="block text-xs text-muted mt-0.5">{textoMedidas(r)}</span>}
+                  </td>
                   <td className="px-4 py-3">{r.local || '—'}</td>
                   <td className="px-4 py-3">{r.criado_por_nome || '—'}</td>
                   <td className="px-4 py-3 text-muted">{formatarData(r.criado_em)}</td>

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { parseCodigo, formatPatrimonio, onlyDigits, patKey, linkDoSistema, DESCRICOES_RAPIDAS } from '@/lib/patrimonio';
 import type { SistemaDados } from '@/lib/govLookup';
-import { comprimirImagem } from '@/lib/imagem';
+import { comprimirImagem, realcarEtiqueta } from '@/lib/imagem';
 import { gerarFichaPdf } from '@/lib/gerarFichaPdf';
 import { enviarFotoParaStorage } from '@/lib/supabaseStorage';
 
@@ -56,6 +56,21 @@ export default function LevantamentoClient({
   const [permitirDuplicado, setPermitirDuplicado] = useState(false);
   const [ultimoPdf, setUltimoPdf] = useState<{ blob: Blob; nomeArquivo: string } | null>(null);
   const [verDadosCompletos, setVerDadosCompletos] = useState(false);
+
+  // Item sem etiqueta/tombo nenhuma (móvel quebrado, etiqueta que caiu
+  // etc.) — mesmo assim precisa entrar na planilha, só com as fotos e a
+  // descrição, sem número de patrimônio nenhum.
+  const [semEtiqueta, setSemEtiqueta] = useState(false);
+
+  // Medidas do item (opcional) — digitadas à mão com uma trena/fita
+  // métrica na hora do cadastro. Não tem como medir sozinho pela câmera
+  // do celular (isso precisaria de sensor de profundidade, que a maioria
+  // dos aparelhos não tem), então o "medidor" aqui é só um jeito rápido
+  // de já deixar isso registrado junto com o item, sem precisar de outro
+  // sistema/planilha separada depois.
+  const [medidaLargura, setMedidaLargura] = useState('');
+  const [medidaAltura, setMedidaAltura] = useState('');
+  const [medidaProfundidade, setMedidaProfundidade] = useState('');
 
   const scannerRef = useRef<any>(null);
   const readerId = 'reader';
@@ -334,12 +349,22 @@ export default function LevantamentoClient({
     if (!patrimonio) lerNumeroDaEtiqueta(comprimida);
   }
 
-  /** Lê o número de patrimônio direto da foto da etiqueta, usando
-   *  reconhecimento de texto (OCR) no navegador — útil pra placas antigas
-   *  sem QR Code, que só têm o número impresso/gravado. */
+  /** Lê o número de patrimônio (e a Desc. analítica, se tiver) direto da
+   *  foto da etiqueta. Primeiro tenta com OCR (tesseract) no próprio
+   *  navegador — rápido e não depende de internet/chave de API. Se isso
+   *  não achar um número (comum em etiquetas antigas, apagadas ou
+   *  riscadas), tenta de novo com a IA de visão do Google numa versão da
+   *  foto com contraste bem realçado (ver realcarEtiqueta em
+   *  lib/imagem.ts) — na prática costuma ler bem mais do que o OCR
+   *  sozinho nesses casos difíceis. Se nem assim conseguir, pede pra
+   *  digitar manualmente — nunca trava o cadastro. */
   async function lerNumeroDaEtiqueta(arquivo: File) {
     setLendoEtiqueta(true);
     setMensagemLeitura('Lendo o número da etiqueta…');
+    let numeroEncontrado = '';
+    let descricaoEncontrada = '';
+    let viaIA = false;
+
     try {
       const { createWorker } = await import('tesseract.js');
       const worker = await createWorker('eng');
@@ -354,25 +379,72 @@ export default function LevantamentoClient({
       // são o que ajuda a achar onde o campo começa e termina.
       const parsed = parseCodigo(textoLido.replace(/\s+/g, ''), 'OCR');
       const parsedDescricao = parseCodigo(textoLido, 'OCR');
-      if (parsed.patrimonio) {
-        setTipoCodigo('Foto (leitura automática)');
-        setPatrimonio(parsed.patrimonio);
-        let msg = `Número lido automaticamente: ${parsed.patrimonio}. Confira se está certo antes de salvar.`;
-        if (parsedDescricao.descricaoSugerida && !descricao) {
-          setDescricao(parsedDescricao.descricaoSugerida);
-          msg += ` Descrição também preenchida pela etiqueta: "${parsedDescricao.descricaoSugerida}".`;
-        }
-        setMensagemLeitura(msg);
-        buscarNoGoverno(parsed.patrimonio);
-        checarDuplicado(parsed.patrimonio);
-      } else {
-        setMensagemLeitura('Não conseguimos ler o número automaticamente nessa foto. Digite o número manualmente abaixo.');
-      }
+      if (parsed.patrimonio) numeroEncontrado = parsed.patrimonio;
+      if (parsedDescricao.descricaoSugerida) descricaoEncontrada = parsedDescricao.descricaoSugerida;
     } catch {
-      setMensagemLeitura('Não foi possível ler a etiqueta automaticamente. Digite o número manualmente.');
-    } finally {
-      setLendoEtiqueta(false);
+      /* segue pra tentativa com IA abaixo */
     }
+
+    // Etiqueta apagada/antiga: o OCR normal não achou o número. Tenta com
+    // a IA do Google numa versão com contraste bem realçado da mesma
+    // foto — não é uma "luz ultravioleta" de verdade (câmera de celular
+    // não capta isso), mas esse realce + a IA juntos costumam conseguir
+    // ler números que a olho nu quase não dá pra ver.
+    if (!numeroEncontrado) {
+      setMensagemLeitura('Não achamos o número com a leitura rápida. Tentando de novo com a IA do Google e um realce de contraste (útil em etiquetas apagadas)…');
+      try {
+        const realcada = await realcarEtiqueta(arquivo);
+        const form = new FormData();
+        form.append('arquivo', realcada, 'etiqueta.jpg');
+        const resp = await fetch('/api/ler-etiqueta', { method: 'POST', body: form });
+        const json = await resp.json();
+        if (resp.ok && json.leitura) {
+          if (json.leitura.numero) {
+            numeroEncontrado = formatPatrimonio(json.leitura.numero);
+            viaIA = true;
+          }
+          if (json.leitura.descricaoAnalitica && !descricaoEncontrada) {
+            descricaoEncontrada = json.leitura.descricaoAnalitica;
+          } else if (json.leitura.item && !descricaoEncontrada) {
+            // Sem "Desc. analítica" na etiqueta — usa o palpite da IA
+            // sobre que objeto é (ex: "Mesa para cadeirante") como
+            // descrição, já que ela também olhou o enquadramento da foto.
+            descricaoEncontrada = json.leitura.item;
+          }
+        } else if (resp.ok && json.iaConfigurada === false) {
+          setMensagemLeitura(
+            'Não conseguimos ler o número automaticamente (e a IA do Google ainda não está configurada nesse site, veja GUIA-IDENTIFICACAO-FOTO.md). Digite o número manualmente abaixo.'
+          );
+        }
+      } catch {
+        /* sem internet, ou a chamada falhou — segue sem a leitura extra */
+      }
+    }
+
+    if (numeroEncontrado) {
+      setTipoCodigo(viaIA ? 'Foto (IA do Google)' : 'Foto (leitura automática)');
+      setPatrimonio(numeroEncontrado);
+      let msg = `Número lido automaticamente${viaIA ? ' pela IA' : ''}: ${numeroEncontrado}. Confira se está certo antes de salvar.`;
+      if (descricaoEncontrada && !descricao) {
+        setDescricao(descricaoEncontrada);
+        msg += ` Descrição também preenchida pela etiqueta: "${descricaoEncontrada}".`;
+      }
+      setMensagemLeitura(msg);
+      buscarNoGoverno(numeroEncontrado);
+      checarDuplicado(numeroEncontrado);
+    } else {
+      if (descricaoEncontrada && !descricao) {
+        setDescricao(descricaoEncontrada);
+        setMensagemLeitura(
+          `Não conseguimos ler o número automaticamente nessa foto, mas achamos a descrição "${descricaoEncontrada}" e já preenchemos. Digite o número manualmente abaixo (ou marque "sem etiqueta/tombo" se ela realmente não tiver número legível).`
+        );
+      } else {
+        setMensagemLeitura(
+          'Não conseguimos ler o número automaticamente nessa foto. Digite manualmente, tente de novo com mais luz/foco, ou marque "Este item não tem etiqueta/tombo" logo abaixo se ela estiver ilegível ou não existir.'
+        );
+      }
+    }
+    setLendoEtiqueta(false);
   }
 
   async function onFotoItemSelecionada(e: React.ChangeEvent<HTMLInputElement>) {
@@ -462,13 +534,18 @@ export default function LevantamentoClient({
       let pdfBlob: Blob | null = null;
       try {
         pdfBlob = await gerarFichaPdf(fotosItem, fotoTombo, {
-          patrimonio,
+          patrimonio: patrimonio || 'Sem etiqueta',
           descricao,
           local,
           tipoCodigo,
           criadoPor: nomeUsuario,
-          linkSistema: linkDoSistema(patrimonio),
-          dadosGoverno
+          linkSistema: patrimonio ? linkDoSistema(patrimonio) : '',
+          dadosGoverno,
+          medidas: {
+            largura: medidaLargura,
+            altura: medidaAltura,
+            profundidade: medidaProfundidade
+          }
         });
       } catch {
         pdfBlob = null; // ficha em PDF é só um extra — nunca impede o cadastro
@@ -492,8 +569,8 @@ export default function LevantamentoClient({
     URL.revokeObjectURL(url);
   }
 
-  function resumoParaCompartilhar(nomeArquivo: string) {
-    return `Escaneia Patrimônio\nPatrimônio: ${patrimonio}\nDescrição: ${descricao || '-'}\nLocal: ${local}\nCadastrado por: ${nomeUsuario}\nFicha em anexo: ${nomeArquivo}`;
+  function resumoParaCompartilhar(nomeArquivo: string, patrimonioOverride?: string) {
+    return `Escaneia Patrimônio\nPatrimônio: ${patrimonioOverride ?? patrimonio}\nDescrição: ${descricao || '-'}\nLocal: ${local}\nCadastrado por: ${nomeUsuario}\nFicha em anexo: ${nomeArquivo}`;
   }
 
   /** Tenta abrir a caixa de compartilhamento nativa do celular (WhatsApp
@@ -583,18 +660,29 @@ export default function LevantamentoClient({
     setDuplicado(null);
     setPermitirDuplicado(false);
     setVerDadosCompletos(false);
+    setSemEtiqueta(false);
+    setMedidaLargura('');
+    setMedidaAltura('');
+    setMedidaProfundidade('');
   }
 
   async function salvar() {
-    if (!patrimonio) {
-      setMensagem({ tipo: 'erro', texto: 'Informe o número do patrimônio.' });
+    if (!semEtiqueta && !patrimonio) {
+      setMensagem({
+        tipo: 'erro',
+        texto: 'Informe o número do patrimônio, ou marque "Este item não tem etiqueta/tombo" logo acima se ele realmente não tiver nenhuma.'
+      });
+      return;
+    }
+    if (semEtiqueta && !fotosItem.length) {
+      setMensagem({ tipo: 'erro', texto: 'Como o item não tem etiqueta, tire ao menos uma foto dele antes de salvar — é o que vai identificar esse registro.' });
       return;
     }
     if (!local) {
       setMensagem({ tipo: 'erro', texto: 'Selecione o local.' });
       return;
     }
-    if (!permitirDuplicado) {
+    if (patrimonio && !permitirDuplicado) {
       const existente = await checarDuplicado(patrimonio);
       if (existente) return; // mostra o aviso de duplicado em vez de salvar
     }
@@ -616,35 +704,50 @@ export default function LevantamentoClient({
         pdfBlob = resultado.pdfBlob;
       }
 
+      // Sem número de patrimônio nenhum (etiqueta ausente/ilegível): gera
+      // uma chave própria pra esse registro, só pra sempre ter um jeito
+      // de identificar/atualizar a linha depois — nunca fica igual a de
+      // outro item sem tombo (então nunca acusa "duplicado" à toa).
+      const semNumero = !patrimonio;
+      const chaveFinal = semNumero ? `SEM-TOMBO-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` : patKey(patrimonio);
+      const patrimonioFinal = semNumero ? 'Sem etiqueta' : patrimonio;
+
       const registro = {
-        tipo: tipoCodigo,
-        patrimonio,
-        patrimonio_key: patKey(patrimonio),
+        tipo: semEtiqueta && semNumero ? 'Sem etiqueta (só foto)' : tipoCodigo,
+        patrimonio: patrimonioFinal,
+        patrimonio_key: chaveFinal,
         descricao,
         local,
-        link: linkDoSistema(patrimonio),
+        link: semNumero ? '' : linkDoSistema(patrimonio),
         dispositivo: 'Site (Escaneia Patrimônio)',
         foto_tombo_url: fotoTomboUrl,
         foto_item_url: fotoItemUrl,
         departamento_governo: dadosGoverno?.departamento || null,
         user_id: user?.id || null,
-        criado_por_nome: nomeUsuario
+        criado_por_nome: nomeUsuario,
+        sem_tombo: semEtiqueta && semNumero,
+        medida_largura_cm: parseMedida(medidaLargura),
+        medida_altura_cm: parseMedida(medidaAltura),
+        medida_profundidade_cm: parseMedida(medidaProfundidade)
       };
 
       const { error } = await supabase.from('patrimonio_registros').insert(registro);
       if (error) throw error;
 
       if (pdfBlob) {
-        const nomeArquivo = `${patKey(patrimonio)} - ${descricao || 'item'}.pdf`;
+        const nomeArquivo = `${chaveFinal} - ${descricao || 'item'}.pdf`;
         setUltimoPdf({ blob: pdfBlob, nomeArquivo });
         // Tenta abrir o compartilhamento sozinho, sem esperar toque no
         // botão — economiza um passo quando o navegador permite. Se não
         // der (ou a pessoa cancelar), o botão "Compartilhar" continua ali
         // pronto pra tentar de novo manualmente.
-        tentarCompartilhar({ blob: pdfBlob, nomeArquivo }, resumoParaCompartilhar(nomeArquivo));
+        tentarCompartilhar({ blob: pdfBlob, nomeArquivo }, resumoParaCompartilhar(nomeArquivo, patrimonioFinal));
       }
 
-      setMensagem({ tipo: 'ok', texto: `Patrimônio ${patrimonio} salvo com sucesso!` });
+      setMensagem({
+        tipo: 'ok',
+        texto: semNumero ? 'Item sem etiqueta salvo com sucesso (com as fotos)!' : `Patrimônio ${patrimonio} salvo com sucesso!`
+      });
       limparFormulario();
     } catch (e: any) {
       setMensagem({ tipo: 'erro', texto: 'Não foi possível salvar. ' + (e?.message || '') });
@@ -725,6 +828,10 @@ export default function LevantamentoClient({
               Abrir câmera e escanear
             </button>
 
+            <p className="text-xs font-semibold text-muted mb-1.5">
+              Tire aqui as duas fotos do bem: a etiqueta do tombo e o item inteiro. Se a etiqueta estiver apagada ou
+              ilegível, tentamos ler mesmo assim com a IA do Google.
+            </p>
             <div className="flex items-center gap-3">
               {fotoTomboPreview && (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -738,11 +845,43 @@ export default function LevantamentoClient({
             {(lendoEtiqueta || mensagemLeitura) && (
               <p className={`text-xs mt-2 ${lendoEtiqueta ? 'text-muted' : 'text-accent-strong'}`}>{mensagemLeitura}</p>
             )}
+
+            <div className="flex items-center gap-3 mt-2">
+              {fotosItemPreview[0] && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={fotosItemPreview[0]} alt="Prévia do item" className="w-14 h-14 rounded-md2 object-cover border border-border flex-shrink-0" />
+              )}
+              <label className="flex-1 rounded-md2 border border-dashed border-border px-4 py-2.5 text-sm font-semibold hover:bg-surface-2 cursor-pointer text-center">
+                {fotosItemPreview.length ? `Foto do item OK (${fotosItemPreview.length}) — tirar outra` : 'Tirar foto do item (o bem inteiro), junto com a do tombo'}
+                <input type="file" accept="image/*" capture="environment" onChange={onFotoItemSelecionada} className="hidden" />
+              </label>
+            </div>
+            {(identificandoItem || mensagemIdentificacao) && (
+              <p className={`text-xs mt-2 ${identificandoItem ? 'text-muted' : 'text-accent-strong'}`}>{mensagemIdentificacao}</p>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setSemEtiqueta((v) => !v)}
+              className={`w-full mt-3 rounded-md2 border px-4 py-2.5 text-sm font-semibold ${
+                semEtiqueta ? 'bg-accent text-white border-accent' : 'border-border hover:bg-surface-2'
+              }`}
+            >
+              {semEtiqueta ? '☑' : '☐'} Este item não tem etiqueta/tombo nenhuma
+            </button>
+            {semEtiqueta && (
+              <p className="text-xs text-accent-strong mt-1.5">
+                Sem problema — com a(s) foto(s) do item já dá pra salvar mesmo sem número de patrimônio, pra esse
+                item não ficar de fora da planilha. Ele entra marcado como "sem etiqueta" pra revisar depois.
+              </p>
+            )}
           </>
         )}
 
         <div className="mt-3">
-          <label className="text-xs font-semibold text-muted">Número do patrimônio</label>
+          <label className="text-xs font-semibold text-muted">
+            Número do patrimônio {semEtiqueta && <span className="font-normal">(deixe em branco se não tiver)</span>}
+          </label>
           <div className="flex gap-2 mt-1">
             <input
               type="text"
@@ -755,7 +894,7 @@ export default function LevantamentoClient({
             />
             <button
               onClick={() => buscarNoGoverno()}
-              disabled={buscando}
+              disabled={buscando || !patrimonio}
               className="rounded-md2 border border-border px-4 py-2 text-sm font-semibold hover:bg-surface-2 disabled:opacity-50 whitespace-nowrap"
             >
               {buscando ? 'Buscando…' : 'Buscar dados'}
@@ -925,6 +1064,40 @@ export default function LevantamentoClient({
         </div>
 
         <div>
+          <label className="text-xs font-semibold text-muted">Medidas do item (opcional)</label>
+          <p className="text-xs text-muted mt-0.5 mb-1.5">
+            Meça com uma trena/fita métrica, se quiser deixar registrado (ex: pra móveis grandes como mesa, armário,
+            estante). Não tem como medir sozinho só pela foto — o celular não tem sensor de profundidade pra isso.
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              inputMode="decimal"
+              value={medidaLargura}
+              onChange={(e) => setMedidaLargura(e.target.value)}
+              placeholder="Largura (cm)"
+              className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+            />
+            <input
+              type="text"
+              inputMode="decimal"
+              value={medidaAltura}
+              onChange={(e) => setMedidaAltura(e.target.value)}
+              placeholder="Altura (cm)"
+              className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+            />
+            <input
+              type="text"
+              inputMode="decimal"
+              value={medidaProfundidade}
+              onChange={(e) => setMedidaProfundidade(e.target.value)}
+              placeholder="Profund. (cm)"
+              className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+            />
+          </div>
+        </div>
+
+        <div>
           <label className="text-xs font-semibold text-muted">Foto do item (opcional, mas recomendado)</label>
           <p className="text-xs text-muted mt-0.5 mb-2">
             Tire uma ou mais fotos do bem inteiro — a primeira foto é analisada automaticamente pela IA do Google
@@ -1025,6 +1198,16 @@ function mensagemErroCamera(e: any): string {
     return 'O navegador bloqueou a câmera porque a conexão não é considerada segura. Confirme que o endereço começa com "https://" e tente de novo.';
   }
   return 'Não foi possível abrir a câmera (' + (nome || 'erro desconhecido') + '). Você pode digitar o número do patrimônio manualmente, ou tentar de novo depois de verificar se o site tem permissão de câmera nas configurações do navegador.';
+}
+
+/** Converte o texto digitado num campo de medida (aceita vírgula ou
+ *  ponto) num número em cm, ou null se o campo estiver vazio/inválido —
+ *  medida é sempre opcional, nunca trava o salvamento. */
+function parseMedida(v: string): number | null {
+  const limpo = v.trim().replace(',', '.');
+  if (!limpo) return null;
+  const n = Number(limpo);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 function formatarDataHora(iso: string) {

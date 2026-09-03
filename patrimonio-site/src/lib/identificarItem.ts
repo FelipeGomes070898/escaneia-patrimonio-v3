@@ -44,3 +44,68 @@ export async function identificarItemNaFoto(base64Jpeg: string): Promise<string 
     return null;
   }
 }
+
+/** Igual à de cima, mas em vez de olhar o item, essa lê a ETIQUETA/placa
+ *  de tombamento — o número, a "Desc. analítica" (quando a etiqueta tem
+ *  esse campo) e, se der pra ver, em que objeto ela está colada. É a
+ *  peça que ajuda nas etiquetas antigas, apagadas ou riscadas, onde o
+ *  OCR simples (tesseract) sozinho normalmente não dá conta: a IA de
+ *  visão do Google costuma "adivinhar" dígitos parciais bem melhor do
+ *  que um OCR genérico, principalmente numa foto já com contraste
+ *  realçado (ver realcarEtiqueta em lib/imagem.ts). */
+const PROMPT_ETIQUETA = `Você está ajudando a catalogar bens patrimoniais de uma repartição pública brasileira (escolas, secretarias de educação). Esta é uma foto de uma etiqueta ou placa de tombamento (adesivo, ou placa de metal/plástico) colada num móvel ou equipamento — pode estar velha, apagada, arranhada, enferrujada ou desbotada. Olhe com bastante atenção, inclusive números ou letras parcialmente apagados, e responda em português EXATAMENTE neste formato, uma linha pra cada campo, sem escrever mais nada além disso:
+NUMERO: (só os dígitos do número de patrimônio/tombamento impresso ou gravado na etiqueta, sem pontos nem espaços; se não conseguir ler nenhum número com confiança, escreva "nenhum")
+DESCRICAO: (o texto curto que aparece ao lado de "Desc. analítica", "Desc. sintética" ou "Descrição" na etiqueta, se ela tiver esse campo; se a etiqueta não tiver esse campo ou não der pra ler, escreva "nenhuma")
+ITEM: (nome curto, de 3 a 6 palavras, do móvel ou equipamento em que essa etiqueta está colada, se der pra ver no enquadramento da foto; se não der pra ver o objeto, escreva "nao identificado")`;
+
+export interface LeituraEtiqueta {
+  numero: string | null;
+  descricaoAnalitica: string | null;
+  item: string | null;
+}
+
+export async function lerEtiquetaComIA(base64Jpeg: string): Promise<LeituraEtiqueta | null> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify({
+        model: MODELO,
+        input: [
+          { type: 'text', text: PROMPT_ETIQUETA },
+          { type: 'image', data: base64Jpeg, mime_type: 'image/jpeg' }
+        ]
+      }),
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    const texto = json?.output_text as string | undefined;
+    if (!texto) return null;
+
+    const numeroM = texto.match(/NUMERO:\s*([^\n]+)/i);
+    const descM = texto.match(/DESCRICAO:\s*([^\n]+)/i);
+    const itemM = texto.match(/ITEM:\s*([^\n]+)/i);
+
+    const campo = (v: string | undefined, negativo: RegExp): string | null => {
+      const limpo = (v || '').replace(/["']/g, '').trim();
+      if (!limpo || negativo.test(limpo)) return null;
+      return limpo;
+    };
+
+    let numero = campo(numeroM?.[1], /nenhum/i);
+    if (numero) numero = numero.replace(/\D+/g, '') || null;
+    if (numero && numero.length < 4) numero = null; // muito curto pra ser um tombamento de verdade
+
+    const descricaoAnalitica = campo(descM?.[1], /nenhuma/i);
+    const item = campo(itemM?.[1], /n[aã]o identificado/i);
+
+    if (!numero && !descricaoAnalitica && !item) return null;
+    return { numero, descricaoAnalitica, item };
+  } catch {
+    return null;
+  }
+}

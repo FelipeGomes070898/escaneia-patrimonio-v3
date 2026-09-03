@@ -13,6 +13,18 @@ interface DadosFicha {
   criadoPor: string;
   linkSistema: string;
   dadosGoverno: SistemaDados | null;
+  medidas?: { largura: string; altura: string; profundidade: string };
+}
+
+/** Junta as três medidas digitadas (largura x altura x profundidade, em
+ *  cm) numa única linha pra ficha — só mostra as que foram preenchidas. */
+function textoMedidas(medidas?: { largura: string; altura: string; profundidade: string }): string {
+  if (!medidas) return '';
+  const partes: string[] = [];
+  if (medidas.largura.trim()) partes.push(`Largura ${medidas.largura.trim()} cm`);
+  if (medidas.altura.trim()) partes.push(`Altura ${medidas.altura.trim()} cm`);
+  if (medidas.profundidade.trim()) partes.push(`Profundidade ${medidas.profundidade.trim()} cm`);
+  return partes.join(' × ');
 }
 
 async function arquivoParaDataUrl(arquivo: File): Promise<string> {
@@ -101,10 +113,11 @@ export async function gerarFichaPdf(
   y = linhaTexto(doc, 'Patrimônio', dados.patrimonio, margem, y);
   y = linhaTexto(doc, 'Descrição', dados.descricao, margem, y);
   y = linhaTexto(doc, 'Local', dados.local, margem, y);
+  y = linhaTexto(doc, 'Medidas (L × A × P)', textoMedidas(dados.medidas), margem, y);
   y = linhaTexto(doc, 'Tipo de leitura', dados.tipoCodigo, margem, y);
   y = linhaTexto(doc, 'Cadastrado por', dados.criadoPor, margem, y);
   y = linhaTexto(doc, 'Data do cadastro', new Date().toLocaleString('pt-BR'), margem, y);
-  y = linhaTexto(doc, 'Link no sistema do governo', dados.linkSistema, margem, y);
+  if (dados.linkSistema) y = linhaTexto(doc, 'Link no sistema do governo', dados.linkSistema, margem, y);
 
   if (dados.dadosGoverno) {
     y += 3;

@@ -17,6 +17,18 @@ interface RegistroPlanilha {
   foto_item_drive_id: string | null;
   criado_por_nome: string | null;
   criado_em: string;
+  sem_tombo: boolean | null;
+  medida_largura_cm: number | null;
+  medida_altura_cm: number | null;
+  medida_profundidade_cm: number | null;
+}
+
+function textoMedidas(r: RegistroPlanilha): string {
+  const partes: string[] = [];
+  if (r.medida_largura_cm) partes.push(String(r.medida_largura_cm));
+  if (r.medida_altura_cm) partes.push(String(r.medida_altura_cm));
+  if (r.medida_profundidade_cm) partes.push(String(r.medida_profundidade_cm));
+  return partes.length ? partes.join(' × ') + ' cm' : '';
 }
 
 const COR_DUPLICADO = 'FFFDE1D3'; // laranja bem clara
@@ -41,7 +53,9 @@ export async function GET(request: NextRequest) {
 
   const { data: todos } = await supabase
     .from('patrimonio_registros')
-    .select('id, patrimonio, patrimonio_key, descricao, local, departamento_governo, foto_item_url, foto_item_drive_id, criado_por_nome, criado_em')
+    .select(
+      'id, patrimonio, patrimonio_key, descricao, local, departamento_governo, foto_item_url, foto_item_drive_id, criado_por_nome, criado_em, sem_tombo, medida_largura_cm, medida_altura_cm, medida_profundidade_cm'
+    )
     .order('criado_em', { ascending: false });
 
   const registros = (todos || []) as RegistroPlanilha[];
@@ -74,6 +88,7 @@ export async function GET(request: NextRequest) {
   planilha.columns = [
     { header: 'DESCRIÇÃO', key: 'descricao', width: 28 },
     { header: 'TOMBAMENTO', key: 'tombamento', width: 16 },
+    { header: 'MEDIDAS (L×A×P)', key: 'medidas', width: 16 },
     { header: 'AMBIENTE', key: 'ambiente', width: 20 },
     { header: 'FOTO DO BEM', key: 'foto', width: 18 },
     { header: 'ONDE O TOMBAMENTO ESTÁ NO E-ESTADO', key: 'ondeGoverno', width: 30 },
@@ -97,14 +112,15 @@ export async function GET(request: NextRequest) {
     const duplicado = (contagem.get(r.patrimonio_key) || 0) > 1;
     const linha = planilha.addRow({
       descricao: r.descricao || '',
-      tombamento: r.patrimonio,
+      tombamento: r.sem_tombo ? 'SEM ETIQUETA' : r.patrimonio,
+      medidas: textoMedidas(r),
       ambiente: r.local || '',
       foto: '',
       ondeGoverno: r.departamento_governo || '',
       novoTombamento: '',
       escolaInteressada: '',
       gestorEscola: '',
-      observacao: duplicado ? '⚠ Tombamento cadastrado mais de uma vez — conferir.' : ''
+      observacao: duplicado && !r.sem_tombo ? '⚠ Tombamento cadastrado mais de uma vez — conferir.' : ''
     });
     linha.height = ALTURA_LINHA;
     linha.alignment = { vertical: 'middle', wrapText: true };
@@ -139,7 +155,7 @@ export async function GET(request: NextRequest) {
       const imageId = workbook.addImage({ buffer: buffer as any, extension: 'jpeg' });
       const linhaIndex = linha.number - 1; // addImage usa índice 0-based
       planilha.addImage(imageId, {
-        tl: { col: 3.05, row: linhaIndex + 0.05 },
+        tl: { col: 4.05, row: linhaIndex + 0.05 },
         ext: { width: 90, height: 78 }
       });
     } else if (r.foto_item_url || r.foto_item_drive_id) {
