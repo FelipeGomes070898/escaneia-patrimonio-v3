@@ -349,49 +349,55 @@ export default function LevantamentoClient({
     if (!patrimonio) lerNumeroDaEtiqueta(comprimida);
   }
 
-  /** Lê o número de patrimônio (e a Desc. analítica, se tiver) direto da
-   *  foto da etiqueta. Primeiro tenta com OCR (tesseract) no próprio
-   *  navegador — rápido e não depende de internet/chave de API. Se isso
-   *  não achar um número (comum em etiquetas antigas, apagadas ou
-   *  riscadas), tenta de novo com a IA de visão do Google numa versão da
-   *  foto com contraste bem realçado (ver realcarEtiqueta em
-   *  lib/imagem.ts) — na prática costuma ler bem mais do que o OCR
-   *  sozinho nesses casos difíceis. Se nem assim conseguir, pede pra
-   *  digitar manualmente — nunca trava o cadastro. */
+  /** Lê o número de patrimônio (e a "Desc. analítica"/"Desc. sintética",
+   *  se tiver) direto da foto da etiqueta. Dispara DUAS leituras ao mesmo
+   *  tempo, em paralelo, em vez de uma depois da outra — assim o tempo de
+   *  espera é o da mais lenta das duas, não a soma:
+   *  1) OCR (tesseract) no próprio navegador, já em português — não
+   *     depende de internet/chave de API.
+   *  2) A IA de visão do Google, numa versão da foto com contraste bem
+   *     realçado (ver realcarEtiqueta em lib/imagem.ts) — não é uma "luz
+   *     ultravioleta" de verdade (câmera de celular não capta isso), mas
+   *     esse realce + a IA juntos costumam ler números que o OCR sozinho
+   *     não consegue, em etiquetas antigas, apagadas ou riscadas.
+   *  No fim, junta o melhor dos dois resultados. Se nenhum achar nada,
+   *  pede pra digitar manualmente — nunca trava o cadastro. */
   async function lerNumeroDaEtiqueta(arquivo: File) {
     setLendoEtiqueta(true);
-    setMensagemLeitura('Lendo o número da etiqueta…');
-    let numeroEncontrado = '';
-    let descricaoEncontrada = '';
-    let viaIA = false;
+    setMensagemLeitura('Lendo a etiqueta (número e descrição) com OCR e com a IA do Google, ao mesmo tempo…');
 
-    try {
-      const { createWorker } = await import('tesseract.js');
-      const worker = await createWorker('eng');
-      const {
-        data: { text }
-      } = await worker.recognize(arquivo);
-      await worker.terminate();
+    const viaOcr = (async () => {
+      let numero = '';
+      let descricao = '';
+      try {
+        const { createWorker } = await import('tesseract.js');
+        // "eng+por" lê tanto os dígitos quanto os acentos/palavras em
+        // português da etiqueta (ex: "Patrimônio", "Desc. sintética") —
+        // com só "eng" a acentuação saía errada com frequência.
+        const worker = await createWorker('eng+por');
+        const {
+          data: { text }
+        } = await worker.recognize(arquivo);
+        await worker.terminate();
 
-      const textoLido = text || '';
-      // Pro número, remove espaços (OCR às vezes separa os dígitos sem
-      // querer). Pra descrição analítica, mantém os espaços/linhas — eles
-      // são o que ajuda a achar onde o campo começa e termina.
-      const parsed = parseCodigo(textoLido.replace(/\s+/g, ''), 'OCR');
-      const parsedDescricao = parseCodigo(textoLido, 'OCR');
-      if (parsed.patrimonio) numeroEncontrado = parsed.patrimonio;
-      if (parsedDescricao.descricaoSugerida) descricaoEncontrada = parsedDescricao.descricaoSugerida;
-    } catch {
-      /* segue pra tentativa com IA abaixo */
-    }
+        const textoLido = text || '';
+        // Pro número, remove espaços (OCR às vezes separa os dígitos sem
+        // querer). Pra descrição, mantém os espaços/linhas — eles são o
+        // que ajuda a achar onde o campo começa e termina.
+        const parsed = parseCodigo(textoLido.replace(/\s+/g, ''), 'OCR');
+        const parsedDescricao = parseCodigo(textoLido, 'OCR');
+        if (parsed.patrimonio) numero = parsed.patrimonio;
+        if (parsedDescricao.descricaoSugerida) descricao = parsedDescricao.descricaoSugerida;
+      } catch {
+        /* sem problema — a leitura pela IA continua rodando em paralelo */
+      }
+      return { numero, descricao };
+    })();
 
-    // Etiqueta apagada/antiga: o OCR normal não achou o número. Tenta com
-    // a IA do Google numa versão com contraste bem realçado da mesma
-    // foto — não é uma "luz ultravioleta" de verdade (câmera de celular
-    // não capta isso), mas esse realce + a IA juntos costumam conseguir
-    // ler números que a olho nu quase não dá pra ver.
-    if (!numeroEncontrado) {
-      setMensagemLeitura('Não achamos o número com a leitura rápida. Tentando de novo com a IA do Google e um realce de contraste (útil em etiquetas apagadas)…');
+    const viaIa = (async () => {
+      let numero = '';
+      let descricao = '';
+      let iaDesligada = false;
       try {
         const realcada = await realcarEtiqueta(arquivo);
         const form = new FormData();
@@ -399,27 +405,34 @@ export default function LevantamentoClient({
         const resp = await fetch('/api/ler-etiqueta', { method: 'POST', body: form });
         const json = await resp.json();
         if (resp.ok && json.leitura) {
-          if (json.leitura.numero) {
-            numeroEncontrado = formatPatrimonio(json.leitura.numero);
-            viaIA = true;
-          }
-          if (json.leitura.descricaoAnalitica && !descricaoEncontrada) {
-            descricaoEncontrada = json.leitura.descricaoAnalitica;
-          } else if (json.leitura.item && !descricaoEncontrada) {
-            // Sem "Desc. analítica" na etiqueta — usa o palpite da IA
-            // sobre que objeto é (ex: "Mesa para cadeirante") como
+          if (json.leitura.numero) numero = formatPatrimonio(json.leitura.numero);
+          if (json.leitura.descricaoAnalitica) {
+            descricao = json.leitura.descricaoAnalitica;
+          } else if (json.leitura.item) {
+            // Sem "Desc. analítica/sintética" na etiqueta — usa o palpite
+            // da IA sobre que objeto é (ex: "Mesa para cadeirante") como
             // descrição, já que ela também olhou o enquadramento da foto.
-            descricaoEncontrada = json.leitura.item;
+            descricao = json.leitura.item;
           }
         } else if (resp.ok && json.iaConfigurada === false) {
-          setMensagemLeitura(
-            'Não conseguimos ler o número automaticamente (e a IA do Google ainda não está configurada nesse site, veja GUIA-IDENTIFICACAO-FOTO.md). Digite o número manualmente abaixo.'
-          );
+          iaDesligada = true;
         }
       } catch {
-        /* sem internet, ou a chamada falhou — segue sem a leitura extra */
+        /* sem internet, ou a chamada falhou — segue só com o OCR */
       }
-    }
+      return { numero, descricao, iaDesligada };
+    })();
+
+    const [resultadoOcr, resultadoIa] = await Promise.all([viaOcr, viaIa]);
+
+    // O OCR só devolve um número quando reconhece dígitos de verdade no
+    // padrão certo (regex), então quando ele acha algo, é normalmente
+    // mais confiável do que um palpite da IA — por isso vem primeiro. A
+    // IA entra como reforço, principalmente nas etiquetas apagadas onde
+    // o OCR não achou nada.
+    const numeroEncontrado = resultadoOcr.numero || resultadoIa.numero;
+    const descricaoEncontrada = resultadoOcr.descricao || resultadoIa.descricao;
+    const viaIA = !resultadoOcr.numero && !!resultadoIa.numero;
 
     if (numeroEncontrado) {
       setTipoCodigo(viaIA ? 'Foto (IA do Google)' : 'Foto (leitura automática)');
@@ -437,6 +450,10 @@ export default function LevantamentoClient({
         setDescricao(descricaoEncontrada);
         setMensagemLeitura(
           `Não conseguimos ler o número automaticamente nessa foto, mas achamos a descrição "${descricaoEncontrada}" e já preenchemos. Digite o número manualmente abaixo (ou marque "sem etiqueta/tombo" se ela realmente não tiver número legível).`
+        );
+      } else if (resultadoIa.iaDesligada) {
+        setMensagemLeitura(
+          'Não conseguimos ler o número automaticamente (e a IA do Google ainda não está configurada nesse site, veja GUIA-IDENTIFICACAO-FOTO.md). Digite o número manualmente abaixo.'
         );
       } else {
         setMensagemLeitura(

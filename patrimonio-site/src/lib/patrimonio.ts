@@ -43,17 +43,18 @@ const DESCRICAO_KEYWORDS = [
   'BALCAO', 'BALCÃO', 'SOFA', 'SOFÁ', 'LONGARINA', 'ARQUIVO'
 ];
 
-/** As etiquetas mais novas do governo trazem, além do QR Code, uma
- *  "Desc. analítica" impressa (ex: "VENTILADOR DE PAREDE 60CM NEW AMA") —
- *  bem mais específica que só adivinhar por palavra-chave. Essa mesma
- *  descrição normalmente também está dentro do próprio QR Code (o texto
- *  lido pela câmera), então dá pra aproveitar na hora, sem nem precisar
- *  esperar a busca no site do governo terminar. Etiquetas mais antigas
- *  podem não ter essa informação — nesse caso simplesmente não acha nada
- *  aqui e o sistema cai pro palpite por palavra-chave (ou pra busca no
- *  governo, ou pra digitação manual mesmo).
- */
-const ROTULO_DESCRICAO_ANALITICA = /desc(?:ri[cç][aã]o)?\.?\s*anal[ií]tica\.?\s*:?\s*/i;
+/** As etiquetas mais novas do governo trazem, além do QR Code, uma breve
+ *  descrição impressa — às vezes rotulada "Desc. analítica", às vezes
+ *  "Desc. sintética" (ex: "CADEIRA GIRATÓRIA C...", "VENTILADOR DE PAREDE
+ *  60CM NEW AMA") — bem mais específica que só adivinhar por palavra-
+ *  chave. Essa mesma descrição normalmente também está dentro do próprio
+ *  QR Code (o texto lido pela câmera), então dá pra aproveitar na hora,
+ *  sem nem precisar esperar a busca no site do governo terminar.
+ *  Etiquetas mais antigas podem não ter essa informação — nesse caso
+ *  simplesmente não acha nada aqui e o sistema cai pro palpite por
+ *  palavra-chave (ou pra busca no governo, ou pra digitação manual
+ *  mesmo). */
+const ROTULO_DESCRICAO_ANALITICA = /desc(?:ri[cç][aã]o)?\.?\s*(?:anal[ií]tica|sint[eé]tica)\.?\s*:?\s*/i;
 
 /** Rótulos que costumam vir DEPOIS da descrição analítica na etiqueta —
  *  usados só pra saber onde cortar o texto capturado, caso o resto dos
@@ -139,7 +140,10 @@ export function parseCodigo(raw: string, formatName: string): CodigoParseado {
   const urlMatch = raw.match(/https?:\/\/\S+/i);
   if (urlMatch) result.link = urlMatch[0];
 
-  const dotted = raw.match(/\b\d{2,3}(?:\.\d{3}){1,3}\b/);
+  // O primeiro grupo (antes do primeiro ponto) pode ter só 1 dígito — por
+  // exemplo "1.430.499" é um tombamento de 7 dígitos válido, não só
+  // "430.499". Por isso aceita de 1 a 3 dígitos ali, não só 2-3.
+  const dotted = raw.match(/\b\d{1,3}(?:\.\d{3}){1,3}\b/);
   if (dotted) {
     result.patrimonio = formatPatrimonio(dotted[0]);
   } else {
