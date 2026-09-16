@@ -12,6 +12,7 @@ interface RegistroPlanilha {
   patrimonio_key: string;
   descricao: string | null;
   local: string | null;
+  escola: string | null;
   departamento_governo: string | null;
   foto_item_url: string | null;
   foto_item_drive_id: string | null;
@@ -54,7 +55,7 @@ export async function GET(request: NextRequest) {
   const { data: todos } = await supabase
     .from('patrimonio_registros')
     .select(
-      'id, patrimonio, patrimonio_key, descricao, local, departamento_governo, foto_item_url, foto_item_drive_id, criado_por_nome, criado_em, sem_tombo, medida_largura_cm, medida_altura_cm, medida_profundidade_cm'
+      'id, patrimonio, patrimonio_key, descricao, local, escola, departamento_governo, foto_item_url, foto_item_drive_id, criado_por_nome, criado_em, sem_tombo, medida_largura_cm, medida_altura_cm, medida_profundidade_cm'
     )
     .order('criado_em', { ascending: false });
 
@@ -66,9 +67,11 @@ export async function GET(request: NextRequest) {
   for (const r of registros) contagem.set(r.patrimonio_key, (contagem.get(r.patrimonio_key) || 0) + 1);
 
   const local = request.nextUrl.searchParams.get('local') || '';
+  const escola = request.nextUrl.searchParams.get('escola') || '';
   const busca = (request.nextUrl.searchParams.get('busca') || '').trim().toLowerCase();
   const filtrados = registros.filter((r) => {
     if (local && r.local !== local) return false;
+    if (escola && r.escola !== escola) return false;
     if (!busca) return true;
     return (
       (r.patrimonio || '').toLowerCase().includes(busca) ||
@@ -89,6 +92,7 @@ export async function GET(request: NextRequest) {
     { header: 'DESCRIÇÃO', key: 'descricao', width: 28 },
     { header: 'TOMBAMENTO', key: 'tombamento', width: 16 },
     { header: 'MEDIDAS (L×A×P)', key: 'medidas', width: 16 },
+    { header: 'ESCOLA/UNIDADE', key: 'escola', width: 22 },
     { header: 'AMBIENTE', key: 'ambiente', width: 20 },
     { header: 'FOTO DO BEM', key: 'foto', width: 18 },
     { header: 'ONDE O TOMBAMENTO ESTÁ NO E-ESTADO', key: 'ondeGoverno', width: 30 },
@@ -114,6 +118,7 @@ export async function GET(request: NextRequest) {
       descricao: r.descricao || '',
       tombamento: r.sem_tombo ? 'SEM ETIQUETA' : r.patrimonio,
       medidas: textoMedidas(r),
+      escola: r.escola || '',
       ambiente: r.local || '',
       foto: '',
       ondeGoverno: r.departamento_governo || '',
@@ -155,7 +160,7 @@ export async function GET(request: NextRequest) {
       const imageId = workbook.addImage({ buffer: buffer as any, extension: 'jpeg' });
       const linhaIndex = linha.number - 1; // addImage usa índice 0-based
       planilha.addImage(imageId, {
-        tl: { col: 4.05, row: linhaIndex + 0.05 },
+        tl: { col: 5.05, row: linhaIndex + 0.05 },
         ext: { width: 90, height: 78 }
       });
     } else if (r.foto_item_url || r.foto_item_drive_id) {

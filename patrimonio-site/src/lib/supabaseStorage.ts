@@ -21,3 +21,33 @@ export async function enviarFotoParaStorage(
   const { data } = supabase.storage.from('patrimonio-fotos').getPublicUrl(caminho);
   return data.publicUrl;
 }
+
+/** Apaga do Storage as fotos (tombo/item) de um ou mais registros, a
+ *  partir das URLs públicas salvas no banco — usado quando um registro é
+ *  excluído, pra realmente liberar espaço (senão a foto continuaria
+ *  ocupando espaço no Storage escondida, mesmo depois de apagar a linha
+ *  da tabela). Nunca trava a exclusão: se uma foto específica não puder
+ *  ser removida (link antigo, já apagada etc.), simplesmente ignora essa
+ *  e segue as outras. */
+export async function removerFotosDoStorage(supabase: SupabaseClient, urls: (string | null | undefined)[]): Promise<void> {
+  const caminhos = urls
+    .filter((u): u is string => !!u)
+    .map((url) => {
+      const marcador = '/patrimonio-fotos/';
+      const i = url.indexOf(marcador);
+      if (i === -1) return null;
+      try {
+        return decodeURIComponent(url.slice(i + marcador.length));
+      } catch {
+        return url.slice(i + marcador.length);
+      }
+    })
+    .filter((c): c is string => !!c);
+
+  if (!caminhos.length) return;
+  try {
+    await supabase.storage.from('patrimonio-fotos').remove(caminhos);
+  } catch {
+    /* melhor esforço — a exclusão do registro já aconteceu, não trava por isso */
+  }
+}

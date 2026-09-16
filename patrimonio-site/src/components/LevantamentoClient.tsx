@@ -11,21 +11,36 @@ import { enviarFotoParaStorage } from '@/lib/supabaseStorage';
 interface RegistroExistente {
   id: string;
   local: string;
+  escola: string | null;
   criado_por_nome: string | null;
   criado_em: string;
   descricao: string | null;
 }
 
+const CHAVE_ESCOLA_ATUAL = 'escaneia_escola_atual';
+
 export default function LevantamentoClient({
   salasIniciais,
+  escolasIniciais,
   nomeUsuario
 }: {
   salasIniciais: string[];
+  escolasIniciais: string[];
   nomeUsuario: string;
 }) {
   const supabase = createClient();
 
   const [salas, setSalas] = useState<string[]>(salasIniciais);
+  // Escola/unidade onde o levantamento de hoje está sendo feito — fica
+  // salva no aparelho (localStorage), não muda a cada item cadastrado.
+  // Assim, quando 6 pessoas saem cada uma pra uma sala diferente da mesma
+  // escola, cada celular já mantém a escola certa marcada em todos os
+  // itens que essa pessoa registrar, sem precisar escolher de novo toda
+  // hora — e na hora de exportar dá pra puxar só os itens dessa escola.
+  const [escolas, setEscolas] = useState<string[]>(escolasIniciais);
+  const [escola, setEscolaState] = useState('');
+  const [novaEscola, setNovaEscola] = useState('');
+  const [mostrarNovaEscola, setMostrarNovaEscola] = useState(false);
   const [escaneando, setEscaneando] = useState(false);
   const [patrimonio, setPatrimonio] = useState('');
   const [descricao, setDescricao] = useState('');
@@ -77,9 +92,33 @@ export default function LevantamentoClient({
   const [lanternaDisponivel, setLanternaDisponivel] = useState(false);
   const [lanternaLigada, setLanternaLigada] = useState(false);
 
+  // Foto tirada direto da câmera já aberta (sem passar pelo app de câmera
+  // do celular) — fica "pendente" até a pessoa confirmar que ficou nítida
+  // ou pedir pra tirar de novo, antes de ela virar de fato a foto da
+  // etiqueta/do item.
+  const [fotoPendente, setFotoPendente] = useState<{ tipo: 'tombo' | 'item'; file: File; url: string } | null>(null);
+
   useEffect(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     setSuportaDitado(!!SR);
+
+    // Recupera a escola/unidade que essa pessoa já tinha escolhido nesse
+    // aparelho (ver comentário no state "escola" acima).
+    try {
+      const salva = window.localStorage.getItem(CHAVE_ESCOLA_ATUAL);
+      if (salva) setEscolaState(salva);
+    } catch {
+      /* localStorage bloqueado (aba anônima, etc.) — sem problema, só não lembra */
+    }
+
+    // Abre a câmera sozinha assim que a tela carrega, sem precisar tocar
+    // em nenhum botão — se o navegador já tiver dado permissão antes
+    // (o normal depois do primeiro uso), abre direto; se ainda não deu
+    // permissão, o próprio navegador pergunta na hora. Se falhar por
+    // qualquer motivo, não mostra erro nenhum aqui (silencioso) — o botão
+    // "Abrir câmera" continua disponível pra tentar manualmente.
+    iniciarCamera(true);
+
     return () => {
       pararCamera();
       try {
@@ -90,6 +129,31 @@ export default function LevantamentoClient({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Define a escola/unidade atual desse levantamento — cria na lista
+   *  compartilhada se ainda não existir (igual "definirLocal" já faz pras
+   *  salas) e lembra no aparelho pros próximos itens. */
+  function definirEscola(nome: string) {
+    const limpo = nome.trim();
+    if (!limpo) return;
+    if (!escolas.includes(limpo)) {
+      setEscolas((prev) => [...prev, limpo].sort());
+      supabase.from('patrimonio_escolas').insert({ nome: limpo }).then(() => {});
+    }
+    setEscolaState(limpo);
+    try {
+      window.localStorage.setItem(CHAVE_ESCOLA_ATUAL, limpo);
+    } catch {
+      /* sem problema, só não vai lembrar na próxima vez que abrir o site */
+    }
+  }
+
+  function adicionarEscola() {
+    if (!novaEscola.trim()) return;
+    definirEscola(novaEscola);
+    setNovaEscola('');
+    setMostrarNovaEscola(false);
+  }
 
   /** Liga/desliga o ditado por voz da Descrição — útil pra digitar menos
    *  no celular, principalmente com uma mão só segurando o item. Usa o
@@ -132,8 +196,12 @@ export default function LevantamentoClient({
     reconhecimento.start();
   }
 
-  async function iniciarCamera() {
-    setMensagem(null);
+  /** Abre a câmera. Quando `silencioso` é true (usado na abertura
+   *  automática da tela), qualquer falha fica quieta — não mostra
+   *  mensagem de erro nenhuma, só deixa o botão "Abrir câmera" disponível
+   *  pra pessoa tentar manualmente quando quiser. */
+  async function iniciarCamera(silencioso = false) {
+    if (!silencioso) setMensagem(null);
     try {
       const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import('html5-qrcode');
       const instancia = new Html5Qrcode(readerId, {
@@ -189,7 +257,61 @@ export default function LevantamentoClient({
       }
     } catch (e: any) {
       setEscaneando(false);
-      setMensagem({ tipo: 'erro', texto: mensagemErroCamera(e) });
+      if (!silencioso) setMensagem({ tipo: 'erro', texto: mensagemErroCamera(e) });
+    }
+  }
+
+  /** Pega um quadro da câmera que já está aberta na tela e devolve como
+   *  arquivo de foto — sem precisar abrir o app de câmera do celular à
+   *  parte. É o que os botões "Fotografar etiqueta"/"Registrar o bem"
+   *  usam. Devolve null se a câmera não estiver pronta ainda. */
+  async function capturarFrameDaCamera(): Promise<File | null> {
+    const video = document.querySelector<HTMLVideoElement>(`#${readerId} video`);
+    if (!video || !video.videoWidth) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0);
+    const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+    if (!blob) return null;
+    return new File([blob], `captura-${Date.now()}.jpg`, { type: 'image/jpeg' });
+  }
+
+  /** Tira a foto (da etiqueta ou do item) direto da câmera aberta e
+   *  mostra em tela grande antes de aceitar — dá pra conferir se ficou
+   *  nítida/focada e tirar de novo se não ficou, em vez de só descobrir
+   *  depois de já ter salvo o item. */
+  async function fotografarAoVivo(tipo: 'tombo' | 'item') {
+    const arquivo = await capturarFrameDaCamera();
+    if (!arquivo) {
+      setMensagem({ tipo: 'erro', texto: 'A câmera ainda não está pronta. Espere um instante e tente de novo.' });
+      return;
+    }
+    if (fotoPendente) URL.revokeObjectURL(fotoPendente.url);
+    setFotoPendente({ tipo, file: arquivo, url: URL.createObjectURL(arquivo) });
+  }
+
+  /** Descarta a foto pendente (a pessoa achou que não ficou boa) — a
+   *  câmera continua aberta, é só tocar de novo no botão de fotografar. */
+  function tirarFotoDeNovo() {
+    if (fotoPendente) URL.revokeObjectURL(fotoPendente.url);
+    setFotoPendente(null);
+  }
+
+  /** A foto pendente ficou boa — usa ela como foto da etiqueta ou do
+   *  item, do mesmo jeito que usaria uma foto tirada pelo app de câmera
+   *  do celular. */
+  async function usarFotoPendente() {
+    if (!fotoPendente) return;
+    const { tipo, file, url } = fotoPendente;
+    setFotoPendente(null);
+    URL.revokeObjectURL(url);
+    if (tipo === 'tombo') {
+      await usarFotoTombo(file);
+    } else {
+      await usarFotoItem(file);
     }
   }
 
@@ -249,7 +371,7 @@ export default function LevantamentoClient({
     setVerificandoDuplicado(true);
     const { data } = await supabase
       .from('patrimonio_registros')
-      .select('id, local, criado_por_nome, criado_em, descricao')
+      .select('id, local, escola, criado_por_nome, criado_em, descricao')
       .eq('patrimonio_key', patKey(numero))
       .maybeSingle();
     setVerificandoDuplicado(false);
@@ -335,6 +457,12 @@ export default function LevantamentoClient({
     const arquivo = e.target.files?.[0];
     if (!arquivo) return;
     e.target.value = '';
+    await usarFotoTombo(arquivo);
+  }
+
+  /** Usa um arquivo (vindo do app de câmera do celular ou de uma captura
+   *  ao vivo da câmera já aberta na tela) como a foto da etiqueta. */
+  async function usarFotoTombo(arquivo: File) {
     // Comprime já na hora de tirar a foto (fotos de celular vêm com vários
     // MB) — segurar várias fotos originais na memória ao mesmo tempo, sem
     // isso, é o que costuma fazer o navegador travar com "insuficiência de
@@ -469,8 +597,14 @@ export default function LevantamentoClient({
     if (!arquivo) return;
     // limpa o input pra poder escolher/tirar outra foto em seguida
     e.target.value = '';
+    await usarFotoItem(arquivo);
+  }
+
+  /** Usa um arquivo (vindo do app de câmera do celular ou de uma captura
+   *  ao vivo da câmera já aberta na tela) como (mais) uma foto do item. */
+  async function usarFotoItem(arquivo: File) {
     const eraPrimeiraFoto = fotosItem.length === 0;
-    // Comprime já ao tirar a foto — ver comentário em onFotoTomboSelecionada.
+    // Comprime já ao tirar a foto — ver comentário em usarFotoTombo.
     const comprimida = await comprimirImagem(arquivo);
     setFotosItem((prev) => [...prev, comprimida]);
     setFotosItemPreview((prev) => [...prev, URL.createObjectURL(comprimida)]);
@@ -661,7 +795,9 @@ export default function LevantamentoClient({
     // até o navegador reclamar de "insuficiência de memória".
     if (fotoTomboPreview) URL.revokeObjectURL(fotoTomboPreview);
     fotosItemPreview.forEach((url) => URL.revokeObjectURL(url));
+    if (fotoPendente) URL.revokeObjectURL(fotoPendente.url);
 
+    setFotoPendente(null);
     setPatrimonio('');
     setDescricao('');
     setTipoCodigo('Manual');
@@ -684,6 +820,10 @@ export default function LevantamentoClient({
   }
 
   async function salvar() {
+    if (!escola) {
+      setMensagem({ tipo: 'erro', texto: 'Selecione (ou crie) a escola/unidade deste levantamento antes de salvar — fica marcada em "Escola/unidade" lá em cima.' });
+      return;
+    }
     if (!semEtiqueta && !patrimonio) {
       setMensagem({
         tipo: 'erro',
@@ -735,6 +875,7 @@ export default function LevantamentoClient({
         patrimonio_key: chaveFinal,
         descricao,
         local,
+        escola,
         link: semNumero ? '' : linkDoSistema(patrimonio),
         dispositivo: 'Site (Escaneia Patrimônio)',
         foto_tombo_url: fotoTomboUrl,
@@ -781,6 +922,64 @@ export default function LevantamentoClient({
         <p className="text-sm text-muted mt-1">Escaneie o código do bem ou digite o número do patrimônio.</p>
       </div>
 
+      <div className="bg-surface rounded-lg2 border border-border p-5">
+        <h2 className="font-display font-bold text-base mb-1">Escola/unidade deste levantamento</h2>
+        <p className="text-xs text-muted mb-3">
+          Marque aqui a escola onde vocês estão fazendo o levantamento agora — fica lembrado nesse aparelho pros
+          próximos itens, então não precisa escolher de novo a cada bem. Se forem várias pessoas na mesma escola,
+          cada uma escolhe aqui no próprio celular; o "Local" logo abaixo é a sala/setor dentro dela.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {escolas.map((e) => (
+            <button
+              key={e}
+              type="button"
+              onClick={() => definirEscola(e)}
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold whitespace-nowrap ${
+                escola === e ? 'bg-accent text-white border-accent' : 'border-border hover:bg-surface-2'
+              }`}
+            >
+              {e}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setMostrarNovaEscola((v) => !v)}
+            className="rounded-full border border-dashed border-border px-3 py-1.5 text-xs font-semibold hover:bg-surface-2 whitespace-nowrap"
+          >
+            + Nova escola/unidade
+          </button>
+        </div>
+        {escolas.length === 0 && !mostrarNovaEscola && (
+          <p className="text-xs text-muted mt-1">Nenhuma escola cadastrada ainda — toque em "+ Nova escola/unidade".</p>
+        )}
+        {mostrarNovaEscola && (
+          <div className="flex gap-2 mt-2">
+            <input
+              type="text"
+              value={novaEscola}
+              onChange={(e) => setNovaEscola(e.target.value)}
+              placeholder="Nome da escola/unidade"
+              className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+              autoFocus
+            />
+            <button
+              onClick={adicionarEscola}
+              className="rounded-md2 bg-accent text-white px-3 py-2 text-sm font-semibold whitespace-nowrap"
+            >
+              Adicionar
+            </button>
+            <button
+              onClick={() => setMostrarNovaEscola(false)}
+              className="rounded-md2 border border-border px-3 py-2 text-sm font-semibold hover:bg-surface-2"
+            >
+              Cancelar
+            </button>
+          </div>
+        )}
+        {escola && <p className="text-xs text-accent-strong mt-2">Levantando em: <strong>{escola}</strong></p>}
+      </div>
+
       {mensagem && (
         <div
           className={`rounded-md2 px-4 py-3 text-sm font-semibold flex items-center justify-between gap-3 flex-wrap ${
@@ -816,13 +1015,74 @@ export default function LevantamentoClient({
             falhava silenciosamente. Por isso ele fica sempre no DOM, só
             escondido com CSS quando não está escaneando. */}
         <div className={escaneando ? 'flex flex-col gap-3' : 'hidden'}>
-          <div id={readerId} className="w-full rounded-md2 overflow-hidden bg-black aspect-video" />
+          {/* A câmera agora já abre sozinha ao entrar nessa tela — não precisa
+              mais tocar em nenhum botão pra começar a escanear. A caixa ficou
+              um pouco mais alta (formato retrato) pra caber melhor a etiqueta
+              e o item inteiro no mesmo enquadramento. */}
+          <div id={readerId} className="w-full rounded-md2 overflow-hidden bg-black aspect-[3/4] max-h-[70vh]" />
+
+          {fotoPendente ? (
+            <div className="rounded-md2 border border-accent bg-surface-2 p-3 flex flex-col gap-2">
+              <p className="text-xs font-semibold text-muted">
+                {fotoPendente.tipo === 'tombo' ? 'Foto da etiqueta — ficou nítida?' : 'Foto do item — ficou nítida?'}
+              </p>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={fotoPendente.url} alt="Prévia da foto tirada" className="w-full rounded-md2 object-contain max-h-[50vh] bg-black" />
+              <div className="flex gap-2">
+                <button
+                  onClick={tirarFotoDeNovo}
+                  className="flex-1 rounded-full border border-border py-2.5 text-sm font-semibold hover:bg-surface-2"
+                >
+                  Tirar de novo
+                </button>
+                <button
+                  onClick={usarFotoPendente}
+                  className="flex-1 rounded-full bg-accent text-white py-2.5 text-sm font-semibold"
+                >
+                  Usar esta foto
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <button
+                onClick={() => fotografarAoVivo('tombo')}
+                className="flex-1 rounded-md2 border border-border py-2.5 text-sm font-semibold hover:bg-surface-2 whitespace-nowrap"
+              >
+                📷 Fotografar etiqueta
+              </button>
+              <button
+                onClick={() => fotografarAoVivo('item')}
+                className="flex-1 rounded-full bg-accent text-white py-2.5 text-sm font-semibold whitespace-nowrap"
+              >
+                📷 Registrar o bem
+              </button>
+            </div>
+          )}
+
+          <div className="flex items-center gap-3">
+            {fotoTomboPreview && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={fotoTomboPreview} alt="Prévia da etiqueta" className="w-12 h-12 rounded-md2 object-cover border border-border flex-shrink-0" />
+            )}
+            {fotosItemPreview[0] && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={fotosItemPreview[0]} alt="Prévia do item" className="w-12 h-12 rounded-md2 object-cover border border-border flex-shrink-0" />
+            )}
+            {(lendoEtiqueta || mensagemLeitura) && (
+              <p className={`text-xs flex-1 ${lendoEtiqueta ? 'text-muted' : 'text-accent-strong'}`}>{mensagemLeitura}</p>
+            )}
+          </div>
+          {(identificandoItem || mensagemIdentificacao) && (
+            <p className={`text-xs ${identificandoItem ? 'text-muted' : 'text-accent-strong'}`}>{mensagemIdentificacao}</p>
+          )}
+
           <div className="flex gap-2">
             <button
               onClick={pararCamera}
               className="flex-1 rounded-full border border-border py-2.5 text-sm font-semibold hover:bg-surface-2"
             >
-              Cancelar câmera
+              Fechar câmera
             </button>
             {lanternaDisponivel && (
               <button
@@ -839,7 +1099,7 @@ export default function LevantamentoClient({
         {!escaneando && (
           <>
             <button
-              onClick={iniciarCamera}
+              onClick={() => iniciarCamera(false)}
               className="w-full rounded-full bg-accent text-white font-semibold py-2.5 text-sm mb-3"
             >
               Abrir câmera e escanear
@@ -929,9 +1189,14 @@ export default function LevantamentoClient({
 
       {duplicado && !permitirDuplicado && (
         <div className="bg-warn/10 border border-warn/30 rounded-lg2 p-5">
-          <h2 className="font-display font-bold text-base text-warn mb-1">⚠ Este patrimônio já foi registrado</h2>
+          <h2 className="font-display font-bold text-base text-warn mb-1">⚠ Este tombo já foi lido antes</h2>
           <p className="text-sm text-muted mb-3">
-            Cadastrado em <strong>{duplicado.local || 'local não informado'}</strong>
+            Já está cadastrado {duplicado.escola && (
+              <>
+                na escola <strong>{duplicado.escola}</strong>,{' '}
+              </>
+            )}
+            em <strong>{duplicado.local || 'local não informado'}</strong>
             {duplicado.criado_por_nome && (
               <>
                 {' '}por <strong>{duplicado.criado_por_nome}</strong>
@@ -940,19 +1205,25 @@ export default function LevantamentoClient({
             em {formatarDataHora(duplicado.criado_em)}
             {duplicado.descricao && <> — {duplicado.descricao}</>}.
           </p>
+          <p className="text-xs text-muted mb-3">
+            Por segurança, esse item nunca é substituído sozinho. Se não tiver certeza de que é o mesmo registro de
+            antes (por exemplo, o bem pode ter sido movido, ou é outro item com etiqueta parecida), o mais seguro é
+            salvar como novo mesmo — depois dá pra conferir e corrigir com calma em "Bens registrados". Só use
+            "Atualizar" se você tiver certeza de que é o mesmo item e só quer corrigir os dados dele.
+          </p>
           <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => setPermitirDuplicado(true)}
+              className="rounded-full bg-accent text-white font-semibold px-4 py-2 text-sm"
+            >
+              Salvar como novo registro (recomendado)
+            </button>
             <button
               onClick={atualizarExistente}
               disabled={salvando}
-              className="rounded-full bg-accent text-white font-semibold px-4 py-2 text-sm disabled:opacity-50"
+              className="rounded-full border border-border px-4 py-2 text-sm font-semibold hover:bg-surface-2 disabled:opacity-50"
             >
-              {salvando ? 'Atualizando…' : 'Atualizar registro existente'}
-            </button>
-            <button
-              onClick={() => setPermitirDuplicado(true)}
-              className="rounded-full border border-border px-4 py-2 text-sm font-semibold hover:bg-surface-2"
-            >
-              Cadastrar mesmo assim como novo
+              {salvando ? 'Atualizando…' : 'Atualizar o registro existente'}
             </button>
           </div>
         </div>

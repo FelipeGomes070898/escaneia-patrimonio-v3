@@ -7,6 +7,7 @@ export default async function LevantamentoPage() {
   const supabase = createClient();
 
   const { data: salas } = await supabase.from('patrimonio_salas').select('nome').order('nome');
+  const { data: escolas } = await supabase.from('patrimonio_escolas').select('nome').order('nome');
   const {
     data: { user }
   } = await supabase.auth.getUser();
@@ -17,6 +18,7 @@ export default async function LevantamentoPage() {
   return (
     <LevantamentoClient
       salasIniciais={(salas || []).map((s: any) => s.nome)}
+      escolasIniciais={(escolas || []).map((e: any) => e.nome)}
       nomeUsuario={perfil?.nome || user?.email?.split('@')[0] || 'Usuário'}
     />
   );

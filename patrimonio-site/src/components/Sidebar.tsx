@@ -8,7 +8,7 @@ import { createClient } from '@/lib/supabase/client';
 const ITENS = [
   { href: '/dashboard', label: 'Início', icon: IconHome },
   { href: '/levantamento', label: 'Levantamento de bens', icon: IconCamera },
-  { href: '/relatorios', label: 'Relatórios', icon: IconChart },
+  { href: '/relatorios', label: 'Bens registrados', icon: IconChart },
   { href: '/usuarios', label: 'Usuários', icon: IconUsers },
   { href: '/configuracoes', label: 'Configurações', icon: IconGear }
 ];
