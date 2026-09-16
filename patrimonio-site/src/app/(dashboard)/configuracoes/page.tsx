@@ -6,6 +6,7 @@ export const dynamic = 'force-dynamic';
 export default async function ConfiguracoesPage() {
   const supabase = createClient();
   const { data: salas } = await supabase.from('patrimonio_salas').select('nome').order('nome');
+  const { data: escolas } = await supabase.from('patrimonio_escolas').select('nome').order('nome');
 
   const {
     data: { user }
@@ -17,6 +18,7 @@ export default async function ConfiguracoesPage() {
   return (
     <ConfiguracoesClient
       salasIniciais={(salas || []).map((s: any) => s.nome)}
+      escolasIniciais={(escolas || []).map((e: any) => e.nome)}
       nomeAtual={perfil?.nome || user?.email?.split('@')[0] || ''}
     />
   );

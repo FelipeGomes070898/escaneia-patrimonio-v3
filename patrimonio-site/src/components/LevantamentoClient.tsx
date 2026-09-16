@@ -17,6 +17,18 @@ interface RegistroExistente {
   descricao: string | null;
 }
 
+/** Uma linha da planilha oficial importada (ver Configurações → Importar
+ *  planilha) — descrição/local/estado já conhecidos oficialmente pra esse
+ *  tombo, sem precisar esperar a busca no e-Estado (que às vezes cai). */
+interface ItemPlanilha {
+  descricao: string | null;
+  ambiente: string | null;
+  estado_conservacao: string | null;
+  classificacao: string | null;
+  tombamento_antigo: string | null;
+  observacao: string | null;
+}
+
 const CHAVE_ESCOLA_ATUAL = 'escaneia_escola_atual';
 
 export default function LevantamentoClient({
@@ -51,6 +63,7 @@ export default function LevantamentoClient({
   const [buscando, setBuscando] = useState(false);
   const [dadosGoverno, setDadosGoverno] = useState<SistemaDados | null>(null);
   const [erroGoverno, setErroGoverno] = useState('');
+  const [dadosPlanilha, setDadosPlanilha] = useState<ItemPlanilha | null>(null);
   const [fotoTombo, setFotoTombo] = useState<File | null>(null);
   const [fotoTomboPreview, setFotoTomboPreview] = useState('');
   const [fotosItem, setFotosItem] = useState<File[]>([]);
@@ -356,6 +369,7 @@ export default function LevantamentoClient({
     if (numero) {
       buscarNoGoverno(numero);
       checarDuplicado(numero);
+      buscarNaPlanilhaImportada(numero);
     }
   }
 
@@ -363,6 +377,35 @@ export default function LevantamentoClient({
     setPatrimonio(formatPatrimonio(v));
     setDuplicado(null);
     setPermitirDuplicado(false);
+    setDadosPlanilha(null);
+  }
+
+  /** Procura o tombo na planilha oficial que já foi importada pra essa
+   *  escola (ver Configurações → Importar planilha) — quando acha, mostra
+   *  a descrição/local/estado já conhecidos na hora, sem precisar esperar
+   *  (ou depender) da busca ao vivo no e-Estado. Só procura se já tiver
+   *  uma escola escolhida, já que a planilha é organizada por escola. */
+  async function buscarNaPlanilhaImportada(numeroOverride?: string) {
+    const numero = numeroOverride || patrimonio;
+    if (!numero || !escola) {
+      setDadosPlanilha(null);
+      return;
+    }
+    const { data } = await supabase
+      .from('patrimonio_planilha_itens')
+      .select('descricao, ambiente, estado_conservacao, classificacao, tombamento_antigo, observacao')
+      .eq('escola', escola)
+      .eq('tombamento_key', patKey(numero))
+      .maybeSingle();
+    setDadosPlanilha(data || null);
+  }
+
+  function usarDescricaoDaPlanilha() {
+    if (dadosPlanilha?.descricao) setDescricao(dadosPlanilha.descricao);
+  }
+
+  function usarLocalDaPlanilha() {
+    if (dadosPlanilha?.ambiente) definirLocal(dadosPlanilha.ambiente);
   }
 
   async function checarDuplicado(numeroOverride?: string) {
@@ -573,6 +616,7 @@ export default function LevantamentoClient({
       setMensagemLeitura(msg);
       buscarNoGoverno(numeroEncontrado);
       checarDuplicado(numeroEncontrado);
+      buscarNaPlanilhaImportada(numeroEncontrado);
     } else {
       if (descricaoEncontrada && !descricao) {
         setDescricao(descricaoEncontrada);
@@ -803,6 +847,7 @@ export default function LevantamentoClient({
     setTipoCodigo('Manual');
     setDadosGoverno(null);
     setErroGoverno('');
+    setDadosPlanilha(null);
     setFotoTombo(null);
     setFotoTomboPreview('');
     setFotosItem([]);
@@ -1165,7 +1210,11 @@ export default function LevantamentoClient({
               inputMode="numeric"
               value={patrimonio}
               onChange={(e) => onPatrimonioChange(e.target.value)}
-              onBlur={() => patrimonio && checarDuplicado(patrimonio)}
+              onBlur={() => {
+                if (!patrimonio) return;
+                checarDuplicado(patrimonio);
+                buscarNaPlanilhaImportada(patrimonio);
+              }}
               placeholder="000.000.000"
               className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent font-mono"
             />
@@ -1186,6 +1235,64 @@ export default function LevantamentoClient({
           )}
         </div>
       </div>
+
+      {dadosPlanilha && (
+        <div className="bg-accent-soft border border-accent/30 rounded-lg2 p-5">
+          <h2 className="font-display font-bold text-base text-accent-strong mb-1">
+            📋 Encontramos esse tombo na planilha oficial importada
+          </h2>
+          <dl className="text-sm flex flex-col gap-1 mb-3">
+            {dadosPlanilha.descricao && (
+              <div>
+                <span className="text-muted">Descrição: </span>
+                <strong>{dadosPlanilha.descricao}</strong>
+              </div>
+            )}
+            {dadosPlanilha.ambiente && (
+              <div>
+                <span className="text-muted">Ambiente na planilha: </span>
+                <strong>{dadosPlanilha.ambiente}</strong>
+              </div>
+            )}
+            {dadosPlanilha.estado_conservacao && (
+              <div>
+                <span className="text-muted">Estado de conservação: </span>
+                <strong>{dadosPlanilha.estado_conservacao}</strong>
+              </div>
+            )}
+            {dadosPlanilha.classificacao && (
+              <div>
+                <span className="text-muted">Classificação: </span>
+                <strong>{dadosPlanilha.classificacao}</strong>
+              </div>
+            )}
+            {dadosPlanilha.observacao && (
+              <div>
+                <span className="text-muted">Observação: </span>
+                <strong>{dadosPlanilha.observacao}</strong>
+              </div>
+            )}
+          </dl>
+          <div className="flex gap-2 flex-wrap">
+            {dadosPlanilha.descricao && (
+              <button
+                onClick={usarDescricaoDaPlanilha}
+                className="rounded-full border border-accent text-accent-strong font-semibold px-4 py-1.5 text-xs whitespace-nowrap hover:bg-white/40"
+              >
+                Usar esta descrição
+              </button>
+            )}
+            {dadosPlanilha.ambiente && (
+              <button
+                onClick={usarLocalDaPlanilha}
+                className="rounded-full border border-accent text-accent-strong font-semibold px-4 py-1.5 text-xs whitespace-nowrap hover:bg-white/40"
+              >
+                Usar "{dadosPlanilha.ambiente}" como local
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {duplicado && !permitirDuplicado && (
         <div className="bg-warn/10 border border-warn/30 rounded-lg2 p-5">

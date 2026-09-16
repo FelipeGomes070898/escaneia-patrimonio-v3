@@ -1,13 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
 export default function ConfiguracoesClient({
   salasIniciais,
+  escolasIniciais,
   nomeAtual
 }: {
   salasIniciais: string[];
+  escolasIniciais: string[];
   nomeAtual: string;
 }) {
   const supabase = createClient();
@@ -15,6 +17,66 @@ export default function ConfiguracoesClient({
   const [nova, setNova] = useState('');
   const [salvando, setSalvando] = useState(false);
   const [erro, setErro] = useState('');
+
+  // Importação da planilha oficial (a mesma que já sai do e-Estado, com
+  // Descrição/Tombamento/Ambiente/Estado de conservação) — serve de
+  // consulta rápida na hora do levantamento, sem depender do site do
+  // governo. Cada nova importação substitui a lista anterior dessa mesma
+  // escola (é sempre a "foto" mais recente, não fica acumulando).
+  const [escolaPlanilha, setEscolaPlanilha] = useState(escolasIniciais[0] || '');
+  const [arquivoPlanilha, setArquivoPlanilha] = useState<File | null>(null);
+  const [importando, setImportando] = useState(false);
+  const [mensagemImportacao, setMensagemImportacao] = useState<{ tipo: 'ok' | 'erro'; texto: string } | null>(null);
+  const [contagemAtual, setContagemAtual] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!escolaPlanilha) {
+      setContagemAtual(null);
+      return;
+    }
+    let cancelado = false;
+    supabase
+      .from('patrimonio_planilha_itens')
+      .select('id', { count: 'exact', head: true })
+      .eq('escola', escolaPlanilha)
+      .then(({ count }) => {
+        if (!cancelado) setContagemAtual(count ?? 0);
+      });
+    return () => {
+      cancelado = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [escolaPlanilha]);
+
+  async function importarPlanilha() {
+    if (!arquivoPlanilha) {
+      setMensagemImportacao({ tipo: 'erro', texto: 'Escolha o arquivo da planilha (.xlsx) primeiro.' });
+      return;
+    }
+    setImportando(true);
+    setMensagemImportacao(null);
+    try {
+      const form = new FormData();
+      form.append('arquivo', arquivoPlanilha);
+      if (escolaPlanilha) form.append('escola', escolaPlanilha);
+      const resp = await fetch('/api/planilha/importar', { method: 'POST', body: form });
+      const json = await resp.json();
+      if (!resp.ok) {
+        setMensagemImportacao({ tipo: 'erro', texto: json?.error || 'Não foi possível importar a planilha.' });
+        return;
+      }
+      setMensagemImportacao({
+        tipo: 'ok',
+        texto: `Importado! ${json.total} item(ns) da aba "${json.aba}" salvos pra escola "${json.escola}".`
+      });
+      if (json.escola === escolaPlanilha) setContagemAtual(json.total);
+      setArquivoPlanilha(null);
+    } catch {
+      setMensagemImportacao({ tipo: 'erro', texto: 'Falha ao enviar a planilha. Verifique sua internet e tente de novo.' });
+    } finally {
+      setImportando(false);
+    }
+  }
 
   const [nome, setNome] = useState(nomeAtual);
   const [salvandoNome, setSalvandoNome] = useState(false);
@@ -122,6 +184,69 @@ export default function ConfiguracoesClient({
           ))}
           {salas.length === 0 && <p className="text-sm text-muted py-4">Nenhum local cadastrado.</p>}
         </div>
+      </div>
+
+      <div className="bg-surface rounded-lg2 border border-border p-5">
+        <h2 className="font-display font-bold text-base mb-1">Importar planilha oficial da escola</h2>
+        <p className="text-xs text-muted mb-3">
+          Suba aqui o arquivo .xlsx do levantamento (a mesma planilha que sai do e-Estado, com Descrição,
+          Tombamento, Ambiente, Estado de conservação etc.). Ela fica guardada como consulta rápida: na hora de
+          escanear um tombo já cadastrado nela, o sistema mostra a descrição/local oficiais na hora, mesmo se o
+          site do governo estiver fora do ar. Cada nova importação substitui a lista anterior dessa mesma escola.
+        </p>
+
+        <label className="text-xs font-semibold text-muted">Escola/unidade da planilha</label>
+        <div className="flex flex-wrap gap-2 mt-1 mb-3">
+          {escolasIniciais.map((e) => (
+            <button
+              key={e}
+              type="button"
+              onClick={() => setEscolaPlanilha(e)}
+              className={`rounded-full border px-3 py-1.5 text-xs font-semibold whitespace-nowrap ${
+                escolaPlanilha === e ? 'bg-accent text-white border-accent' : 'border-border hover:bg-surface-2'
+              }`}
+            >
+              {e}
+            </button>
+          ))}
+          {escolasIniciais.length === 0 && (
+            <p className="text-xs text-muted">
+              Nenhuma escola cadastrada ainda — crie uma na tela de Levantamento antes de importar (ou deixe em
+              branco que tentamos adivinhar pela própria planilha).
+            </p>
+          )}
+        </div>
+        {escolaPlanilha && contagemAtual !== null && (
+          <p className="text-xs text-muted mb-3">
+            {contagemAtual > 0
+              ? `Já tem ${contagemAtual} item(ns) importado(s) pra "${escolaPlanilha}" — importar de novo substitui essa lista.`
+              : `Nenhum item importado ainda pra "${escolaPlanilha}".`}
+          </p>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex-1 min-w-[200px] rounded-md2 border border-dashed border-border px-4 py-2.5 text-sm font-semibold hover:bg-surface-2 cursor-pointer text-center">
+            {arquivoPlanilha ? arquivoPlanilha.name : 'Escolher arquivo .xlsx'}
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={(e) => setArquivoPlanilha(e.target.files?.[0] || null)}
+              className="hidden"
+            />
+          </label>
+          <button
+            onClick={importarPlanilha}
+            disabled={importando}
+            className="rounded-md2 bg-accent text-white px-4 py-2.5 text-sm font-semibold disabled:opacity-50 whitespace-nowrap"
+          >
+            {importando ? 'Importando…' : 'Importar planilha'}
+          </button>
+        </div>
+        {mensagemImportacao && (
+          <p className={`text-xs mt-2 ${mensagemImportacao.tipo === 'ok' ? 'text-ok' : 'text-danger'}`}>
+            {mensagemImportacao.texto}
+          </p>
+        )}
       </div>
 
       <div className="bg-surface rounded-lg2 border border-border p-5">
