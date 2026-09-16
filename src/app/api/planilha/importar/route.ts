@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import ExcelJS from 'exceljs';
+import * as XLSX from 'xlsx';
 import { createClient } from '@/lib/supabase/server';
 import { patKey } from '@/lib/patrimonio';
 
@@ -7,6 +7,7 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const TAMANHO_MAXIMO = 15 * 1024 * 1024; // 15 MB
+const EXTENSOES_ACEITAS = ['xlsx', 'xls', 'csv'];
 
 /** Tira acento/maiúscula/espaço extra de um texto, só pra comparar nomes
  *  de coluna sem depender de acentuação/maiúscula exatas (a mesma
@@ -57,25 +58,21 @@ function mapearColunas(cabecalho: any[]): ColunaMapeada | null {
   };
 }
 
-function valorCelula(row: ExcelJS.Row, indice: number): string {
-  if (indice < 0) return '';
-  const v = row.getCell(indice + 1).value;
+function valorDaLinha(linha: any[], indice: number): string {
+  if (indice < 0 || !linha) return '';
+  const v = linha[indice];
   if (v == null) return '';
-  if (typeof v === 'object' && 'text' in (v as any)) return String((v as any).text || '').trim();
-  if (typeof v === 'object' && 'richText' in (v as any)) {
-    return ((v as any).richText || []).map((t: any) => t.text).join('').trim();
-  }
   return String(v).trim();
 }
 
-/** Recebe a planilha oficial de levantamento (.xlsx) que a escola já usa
- *  com o e-Estado — Descrição, Tombamento, Ambiente, Estado de
- *  conservação, Classificação etc. — e guarda como uma lista de consulta
- *  rápida pra essa escola. Serve pra, na hora de escanear um tombo, achar
- *  a descrição/local oficiais na hora, sem depender do site do governo
- *  (que às vezes cai ou demora). Cada nova importação substitui a lista
- *  anterior dessa mesma escola (a planilha é sempre a "foto" mais recente
- *  do levantamento, não algo pra ir acumulando). */
+/** Recebe a planilha oficial de levantamento (.xlsx, .xls ou .csv) que a
+ *  escola já usa com o e-Estado — Descrição, Tombamento, Ambiente, Estado
+ *  de conservação, Classificação etc. — e guarda como uma lista de
+ *  consulta rápida pra essa escola. Serve pra, na hora de escanear um
+ *  tombo, achar a descrição/local oficiais na hora, sem depender do site
+ *  do governo (que às vezes cai ou demora). Cada nova importação
+ *  substitui a lista anterior dessa mesma escola (a planilha é sempre a
+ *  "foto" mais recente do levantamento, não algo pra ir acumulando). */
 export async function POST(request: NextRequest) {
   const supabase = createClient();
   const {
@@ -99,41 +96,63 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'A planilha é muito grande (máximo 15 MB).' }, { status: 400 });
   }
 
+  const nomeArquivo = (arquivo as any).name ? String((arquivo as any).name) : '';
+  const extensao = nomeArquivo.includes('.') ? nomeArquivo.split('.').pop()!.toLowerCase() : '';
+  if (extensao && !EXTENSOES_ACEITAS.includes(extensao)) {
+    return NextResponse.json(
+      { error: 'Formato não reconhecido. Envie um arquivo .xlsx, .xls ou .csv.' },
+      { status: 400 }
+    );
+  }
+
   const buffer = Buffer.from(await arquivo.arrayBuffer());
-  const workbook = new ExcelJS.Workbook();
+  let workbook: XLSX.WorkBook;
   try {
-    await workbook.xlsx.load(buffer as any);
+    workbook = XLSX.read(buffer, { type: 'buffer' });
   } catch {
-    return NextResponse.json({ error: 'Não conseguimos abrir esse arquivo. Confira se é mesmo um .xlsx válido.' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Não conseguimos abrir esse arquivo. Confira se ele não está corrompido e se é mesmo .xlsx, .xls ou .csv.' },
+      { status: 400 }
+    );
+  }
+
+  if (!workbook.SheetNames.length) {
+    return NextResponse.json({ error: 'Essa planilha não tem nenhuma aba com dados.' }, { status: 400 });
   }
 
   // Procura primeiro uma aba chamada algo como "LEVANTAMENTO..." (é o
   // formato padrão da planilha do e-Estado, com um item por linha); se não
   // achar, tenta cada aba em ordem até achar uma com cabeçalho reconhecível.
-  let planilha =
-    workbook.worksheets.find((ws) => normalizar(ws.name).includes('LEVANTAMENTO')) || null;
+  let nomeAbaEscolhida = workbook.SheetNames.find((n) => normalizar(n).includes('LEVANTAMENTO')) || null;
   let colunas: ColunaMapeada | null = null;
-  let linhaCabecalho = 1;
+  let linhaCabecalho = 0; // índice 0-based dentro da matriz de linhas da aba
+  let linhasMatriz: any[][] = [];
 
-  const abasParaTentar = planilha ? [planilha, ...workbook.worksheets.filter((w) => w !== planilha)] : workbook.worksheets;
+  const abasParaTentar = nomeAbaEscolhida
+    ? [nomeAbaEscolhida, ...workbook.SheetNames.filter((n) => n !== nomeAbaEscolhida)]
+    : workbook.SheetNames;
 
-  for (const aba of abasParaTentar) {
+  for (const nomeAba of abasParaTentar) {
+    const planilha = workbook.Sheets[nomeAba];
+    if (!planilha) continue;
+    const matriz: any[][] = XLSX.utils.sheet_to_json(planilha, { header: 1, raw: false, defval: '', blankrows: false });
+
     // O cabeçalho de verdade pode não estar na linha 1 (às vezes tem um
     // título da tabela antes) — procura nas primeiras 5 linhas.
-    for (let l = 1; l <= Math.min(5, aba.rowCount); l++) {
-      const valores = aba.getRow(l).values as any[];
-      const tentativa = mapearColunas(Array.isArray(valores) ? valores.slice(1) : []);
+    for (let l = 0; l < Math.min(5, matriz.length); l++) {
+      const tentativa = mapearColunas(matriz[l] || []);
       if (tentativa) {
-        planilha = aba;
+        nomeAbaEscolhida = nomeAba;
         colunas = tentativa;
         linhaCabecalho = l;
+        linhasMatriz = matriz;
         break;
       }
     }
     if (colunas) break;
   }
 
-  if (!planilha || !colunas) {
+  if (!nomeAbaEscolhida || !colunas) {
     return NextResponse.json(
       { error: 'Não reconhecemos as colunas dessa planilha. Ela precisa ter pelo menos uma coluna de "Descrição" e uma de "Tombamento".' },
       { status: 400 }
@@ -152,27 +171,27 @@ export async function POST(request: NextRequest) {
   }[] = [];
   const contagemEscola = new Map<string, number>();
 
-  for (let l = linhaCabecalho + 1; l <= planilha.rowCount; l++) {
-    const row = planilha.getRow(l);
-    const tombamentoRaw = valorCelula(row, colunas.tombamento);
-    const descricao = valorCelula(row, colunas.descricao);
+  for (let l = linhaCabecalho + 1; l < linhasMatriz.length; l++) {
+    const linha = linhasMatriz[l] || [];
+    const tombamentoRaw = valorDaLinha(linha, colunas.tombamento);
+    const descricao = valorDaLinha(linha, colunas.descricao);
     if (!tombamentoRaw || !descricao) continue; // linha vazia/sem dado útil — pula
 
     const chave = patKey(tombamentoRaw);
     if (!chave) continue;
 
-    const carga = valorCelula(row, colunas.cargaAtual);
+    const carga = valorDaLinha(linha, colunas.cargaAtual);
     if (carga) contagemEscola.set(carga, (contagemEscola.get(carga) || 0) + 1);
 
     linhas.push({
       tombamento_key: chave,
       tombamento: tombamentoRaw,
-      tombamento_antigo: valorCelula(row, colunas.tombamentoAntigo),
+      tombamento_antigo: valorDaLinha(linha, colunas.tombamentoAntigo),
       descricao,
-      ambiente: valorCelula(row, colunas.ambiente),
-      estado_conservacao: valorCelula(row, colunas.estadoConservacao),
-      classificacao: valorCelula(row, colunas.classificacao),
-      observacao: valorCelula(row, colunas.observacao)
+      ambiente: valorDaLinha(linha, colunas.ambiente),
+      estado_conservacao: valorDaLinha(linha, colunas.estadoConservacao),
+      classificacao: valorDaLinha(linha, colunas.classificacao),
+      observacao: valorDaLinha(linha, colunas.observacao)
     });
   }
 
@@ -207,5 +226,5 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  return NextResponse.json({ ok: true, escola, total: linhas.length, aba: planilha.name });
+  return NextResponse.json({ ok: true, escola, total: linhas.length, aba: nomeAbaEscolhida });
 }

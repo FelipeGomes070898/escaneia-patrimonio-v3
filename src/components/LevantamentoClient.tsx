@@ -100,6 +100,29 @@ export default function LevantamentoClient({
   const [medidaAltura, setMedidaAltura] = useState('');
   const [medidaProfundidade, setMedidaProfundidade] = useState('');
 
+  // Régua digital: mede pela própria foto do item, tocando dois pontos por
+  // vez — pra quando não tem trena à mão. Funciona em duas etapas: primeiro
+  // toca nas duas pontas de um objeto de tamanho JÁ CONHECIDO que apareça na
+  // foto (folha A4, cartão, ou um tamanho digitado à mão) pra calibrar
+  // quantos pixels da imagem valem 1 centímetro; depois toca nas duas
+  // pontas do que quer medir (largura, altura, profundidade, ou uma
+  // diagonal qualquer) e o sistema calcula a distância real. É sempre uma
+  // ESTIMATIVA visual — por isso só preenche os mesmos campos de "Medidas
+  // do item" acima, que continuam editáveis à mão, e sempre mostra um
+  // aviso deixando isso claro (não é sensor de profundidade, é geometria
+  // simples comparando com o objeto de referência).
+  const [medindoPelaFoto, setMedindoPelaFoto] = useState(false);
+  const [tipoReferencia, setTipoReferencia] = useState<'a4-altura' | 'a4-largura' | 'cartao' | 'manual'>('a4-altura');
+  const [tamanhoRefManual, setTamanhoRefManual] = useState('');
+  const [pontosCalibracao, setPontosCalibracao] = useState<{ x: number; y: number }[]>([]);
+  const [pxPorCm, setPxPorCm] = useState<number | null>(null);
+  const [pontosMedidaAtual, setPontosMedidaAtual] = useState<{ x: number; y: number }[]>([]);
+  const [rotuloMedidaAtual, setRotuloMedidaAtual] = useState<'Largura' | 'Altura' | 'Profundidade' | 'Diagonal'>('Altura');
+  const [medicoesPelaFoto, setMedicoesPelaFoto] = useState<
+    { rotulo: string; cm: number; p1: { x: number; y: number }; p2: { x: number; y: number } }[]
+  >([]);
+  const imgMedicaoRef = useRef<HTMLImageElement>(null);
+
   const scannerRef = useRef<any>(null);
   const readerId = 'reader';
   const [lanternaDisponivel, setLanternaDisponivel] = useState(false);
@@ -697,6 +720,110 @@ export default function LevantamentoClient({
       if (removida) URL.revokeObjectURL(removida);
       return prev.filter((_, i) => i !== indice);
     });
+    // A régua digital foi calibrada em cima da foto que acabou de sumir —
+    // fecha a ferramenta pra não deixar pontos/medidas de uma foto que não
+    // existe mais.
+    if (indice === 0) {
+      setMedindoPelaFoto(false);
+      reiniciarCalibracao();
+    }
+  }
+
+  /** Tamanho real (em cm) do objeto de referência escolhido pra calibrar a
+   *  régua digital — por isso as opções prontas são objetos de tamanho
+   *  padronizado (folha A4, cartão/crachá) que dá pra confiar sem precisar
+   *  medir de novo; "Digitar tamanho" cobre qualquer outro objeto que já
+   *  esteja na foto. */
+  function tamanhoDaReferenciaCm(): number | null {
+    if (tipoReferencia === 'a4-altura') return 29.7;
+    if (tipoReferencia === 'a4-largura') return 21;
+    if (tipoReferencia === 'cartao') return 8.56;
+    return parseMedida(tamanhoRefManual);
+  }
+
+  /** Distância entre dois pontos tocados na foto, em pixels da imagem
+   *  ORIGINAL (não do tamanho exibido na tela) — assim não depende do
+   *  zoom/tamanho da janela do celular no momento do toque. */
+  function distanciaEmPixelsNaturais(p1: { x: number; y: number }, p2: { x: number; y: number }, img: HTMLImageElement) {
+    const dx = (p2.x - p1.x) * img.naturalWidth;
+    const dy = (p2.y - p1.y) * img.naturalHeight;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  /** Registra um toque na foto: os dois primeiros toques (quando ainda não
+   *  tem escala definida) calibram a régua contra o objeto de referência
+   *  escolhido; os toques seguintes medem o que a pessoa marcou (largura,
+   *  altura, profundidade ou uma diagonal). */
+  function tocarNaFotoParaMedir(e: React.MouseEvent<HTMLImageElement>) {
+    const img = e.currentTarget;
+    const rect = img.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return;
+    const ponto = { x, y };
+
+    if (!pxPorCm) {
+      const novosPontos = pontosCalibracao.length >= 2 ? [ponto] : [...pontosCalibracao, ponto];
+      setPontosCalibracao(novosPontos);
+      if (novosPontos.length === 2) {
+        const tamanhoCm = tamanhoDaReferenciaCm();
+        if (!tamanhoCm) {
+          setPontosCalibracao([]);
+          return;
+        }
+        const distPx = distanciaEmPixelsNaturais(novosPontos[0], novosPontos[1], img);
+        if (distPx > 0) setPxPorCm(distPx / tamanhoCm);
+      }
+      return;
+    }
+
+    const novosPontosMedida = pontosMedidaAtual.length >= 2 ? [ponto] : [...pontosMedidaAtual, ponto];
+    setPontosMedidaAtual(novosPontosMedida);
+    if (novosPontosMedida.length === 2) {
+      const distPx = distanciaEmPixelsNaturais(novosPontosMedida[0], novosPontosMedida[1], img);
+      const cm = distPx / pxPorCm;
+      setMedicoesPelaFoto((prev) => {
+        if (rotuloMedidaAtual === 'Diagonal') {
+          const n = prev.filter((m) => m.rotulo.startsWith('Diagonal')).length + 1;
+          return [...prev, { rotulo: `Diagonal ${n}`, cm, p1: novosPontosMedida[0], p2: novosPontosMedida[1] }];
+        }
+        return [
+          ...prev.filter((m) => m.rotulo !== rotuloMedidaAtual),
+          { rotulo: rotuloMedidaAtual, cm, p1: novosPontosMedida[0], p2: novosPontosMedida[1] }
+        ];
+      });
+      setPontosMedidaAtual([]);
+    }
+  }
+
+  function reiniciarCalibracao() {
+    setPxPorCm(null);
+    setPontosCalibracao([]);
+    setPontosMedidaAtual([]);
+    setMedicoesPelaFoto([]);
+  }
+
+  function removerMedicaoPelaFoto(rotulo: string) {
+    setMedicoesPelaFoto((prev) => prev.filter((m) => m.rotulo !== rotulo));
+  }
+
+  /** Copia as medidas de largura/altura/profundidade calculadas pela régua
+   *  digital pros mesmos campos de texto de "Medidas do item" (que
+   *  continuam editáveis à mão depois). Diagonais não têm campo próprio —
+   *  ficam só na lista, como conferência. */
+  function aplicarMedicoesAosCampos() {
+    const largura = medicoesPelaFoto.find((m) => m.rotulo === 'Largura');
+    const altura = medicoesPelaFoto.find((m) => m.rotulo === 'Altura');
+    const profundidade = medicoesPelaFoto.find((m) => m.rotulo === 'Profundidade');
+    if (largura) setMedidaLargura(largura.cm.toFixed(1).replace('.', ','));
+    if (altura) setMedidaAltura(altura.cm.toFixed(1).replace('.', ','));
+    if (profundidade) setMedidaProfundidade(profundidade.cm.toFixed(1).replace('.', ','));
+    setMedindoPelaFoto(false);
+  }
+
+  function fecharFerramentaMedicao() {
+    setMedindoPelaFoto(false);
+    reiniciarCalibracao();
   }
 
   /** Sobe as fotos (tombo + primeira foto do item) pro Storage do
@@ -862,6 +989,8 @@ export default function LevantamentoClient({
     setMedidaLargura('');
     setMedidaAltura('');
     setMedidaProfundidade('');
+    setMedindoPelaFoto(false);
+    reiniciarCalibracao();
   }
 
   async function salvar() {
@@ -1461,8 +1590,9 @@ export default function LevantamentoClient({
         <div>
           <label className="text-xs font-semibold text-muted">Medidas do item (opcional)</label>
           <p className="text-xs text-muted mt-0.5 mb-1.5">
-            Meça com uma trena/fita métrica, se quiser deixar registrado (ex: pra móveis grandes como mesa, armário,
-            estante). Não tem como medir sozinho só pela foto — o celular não tem sensor de profundidade pra isso.
+            Meça com uma trena/fita métrica, se tiver à mão. Sem trena, use a régua digital abaixo pra estimar a
+            medida comparando com um objeto de tamanho conhecido (folha A4, cartão etc.) que apareça na foto do
+            item.
           </p>
           <div className="flex gap-2">
             <input
@@ -1490,6 +1620,197 @@ export default function LevantamentoClient({
               className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
             />
           </div>
+
+          {!medindoPelaFoto &&
+            (fotosItemPreview[0] ? (
+              <button
+                type="button"
+                onClick={() => {
+                  reiniciarCalibracao();
+                  setMedindoPelaFoto(true);
+                }}
+                className="mt-2 text-xs font-semibold text-accent-strong hover:underline"
+              >
+                📐 Sem trena? Medir pela foto do item (estimativa) →
+              </button>
+            ) : (
+              <p className="text-xs text-muted mt-2">
+                Tire a foto do item mais abaixo pra poder usar a régua digital (medir pela foto).
+              </p>
+            ))}
+
+          {medindoPelaFoto && fotosItemPreview[0] && (
+            <div className="bg-surface-2 border border-border rounded-md2 p-3 mt-3">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-bold text-muted uppercase tracking-wide">Régua digital (estimativa)</h3>
+                <button type="button" onClick={fecharFerramentaMedicao} className="text-xs font-semibold text-muted hover:underline">
+                  Fechar
+                </button>
+              </div>
+
+              {!pxPorCm ? (
+                <>
+                  <p className="text-xs text-muted mb-2">
+                    Passo 1 de 2: toque nas duas pontas de um objeto de tamanho conhecido que apareça NA FOTO, pra
+                    calibrar a régua. Se não tiver folha nem cartão na foto, tire a foto de novo com um desses do
+                    lado do item, ou digite manualmente o tamanho de algum objeto que já esteja nela.
+                  </p>
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {(
+                      [
+                        { v: 'a4-altura', l: 'Folha A4 (29,7 cm)' },
+                        { v: 'a4-largura', l: 'Folha A4 deitada (21 cm)' },
+                        { v: 'cartao', l: 'Cartão/crachá (8,5 cm)' },
+                        { v: 'manual', l: 'Digitar tamanho' }
+                      ] as const
+                    ).map((op) => (
+                      <button
+                        key={op.v}
+                        type="button"
+                        onClick={() => {
+                          setTipoReferencia(op.v);
+                          setPontosCalibracao([]);
+                        }}
+                        className={`rounded-full border px-3 py-1.5 text-xs font-semibold whitespace-nowrap ${
+                          tipoReferencia === op.v ? 'bg-accent text-white border-accent' : 'border-border hover:bg-surface'
+                        }`}
+                      >
+                        {op.l}
+                      </button>
+                    ))}
+                  </div>
+                  {tipoReferencia === 'manual' && (
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={tamanhoRefManual}
+                      onChange={(e) => setTamanhoRefManual(e.target.value)}
+                      placeholder="Tamanho do objeto de referência (cm)"
+                      className="w-full mb-2 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+                    />
+                  )}
+                  <p className="text-xs font-semibold text-accent-strong mb-2">
+                    {pontosCalibracao.length === 0
+                      ? 'Toque numa ponta do objeto de referência na foto abaixo.'
+                      : 'Agora toque na outra ponta do objeto de referência.'}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-muted mb-2">
+                    Passo 2 de 2: escolha o que vai medir e toque nas duas pontas na foto. Pode repetir pra largura,
+                    altura, profundidade e diagonais, quantas vezes quiser.
+                  </p>
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {(['Largura', 'Altura', 'Profundidade', 'Diagonal'] as const).map((r) => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => {
+                          setRotuloMedidaAtual(r);
+                          setPontosMedidaAtual([]);
+                        }}
+                        className={`rounded-full border px-3 py-1.5 text-xs font-semibold whitespace-nowrap ${
+                          rotuloMedidaAtual === r ? 'bg-accent text-white border-accent' : 'border-border hover:bg-surface'
+                        }`}
+                      >
+                        {r}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs font-semibold text-accent-strong mb-2">
+                    {pontosMedidaAtual.length === 0
+                      ? `Toque numa ponta do que quer medir como "${rotuloMedidaAtual}".`
+                      : 'Agora toque na outra ponta.'}
+                  </p>
+                </>
+              )}
+
+              <div className="relative w-full select-none" style={{ touchAction: 'manipulation' }}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  ref={imgMedicaoRef}
+                  src={fotosItemPreview[0]}
+                  alt="Foto do item para medir"
+                  onClick={tocarNaFotoParaMedir}
+                  draggable={false}
+                  className="w-full h-auto block rounded-md2 border border-border cursor-crosshair"
+                />
+                <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+                  {!pxPorCm &&
+                    pontosCalibracao.map((p, i) => <circle key={i} cx={p.x * 100} cy={p.y * 100} r="1.4" fill="#0E7C86" />)}
+                  {!pxPorCm && pontosCalibracao.length === 2 && (
+                    <line
+                      x1={pontosCalibracao[0].x * 100}
+                      y1={pontosCalibracao[0].y * 100}
+                      x2={pontosCalibracao[1].x * 100}
+                      y2={pontosCalibracao[1].y * 100}
+                      stroke="#0E7C86"
+                      strokeWidth="0.7"
+                    />
+                  )}
+                  {pxPorCm &&
+                    medicoesPelaFoto.map((m, i) => (
+                      <line
+                        key={i}
+                        x1={m.p1.x * 100}
+                        y1={m.p1.y * 100}
+                        x2={m.p2.x * 100}
+                        y2={m.p2.y * 100}
+                        stroke="#D97706"
+                        strokeWidth="0.7"
+                      />
+                    ))}
+                  {pxPorCm &&
+                    pontosMedidaAtual.map((p, i) => <circle key={i} cx={p.x * 100} cy={p.y * 100} r="1.4" fill="#D97706" />)}
+                </svg>
+              </div>
+
+              {pxPorCm && (
+                <>
+                  <button type="button" onClick={reiniciarCalibracao} className="text-xs font-semibold text-muted hover:underline mt-2">
+                    Errei a referência — calibrar de novo
+                  </button>
+
+                  {medicoesPelaFoto.length > 0 && (
+                    <div className="mt-3 flex flex-col gap-1.5">
+                      {medicoesPelaFoto.map((m) => (
+                        <div
+                          key={m.rotulo}
+                          className="flex items-center justify-between text-sm bg-surface rounded-md2 border border-border px-3 py-1.5"
+                        >
+                          <span>
+                            <strong>{m.rotulo}:</strong> {m.cm.toFixed(1).replace('.', ',')} cm
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => removerMedicaoPelaFoto(m.rotulo)}
+                            className="text-xs font-semibold text-danger hover:underline"
+                          >
+                            Remover
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <p className="text-xs text-muted mt-3">
+                    ⚠ Medição é uma estimativa visual, baseada no objeto de referência escolhido — pode ter alguns
+                    centímetros de diferença. Para maior precisão, use uma trena de verdade.
+                  </p>
+
+                  <button
+                    type="button"
+                    onClick={aplicarMedicoesAosCampos}
+                    disabled={!medicoesPelaFoto.some((m) => m.rotulo === 'Largura' || m.rotulo === 'Altura' || m.rotulo === 'Profundidade')}
+                    className="w-full mt-2 rounded-md2 bg-accent text-white px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                  >
+                    Usar essas medidas nos campos acima
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         <div>

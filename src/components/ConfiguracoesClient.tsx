@@ -50,7 +50,7 @@ export default function ConfiguracoesClient({
 
   async function importarPlanilha() {
     if (!arquivoPlanilha) {
-      setMensagemImportacao({ tipo: 'erro', texto: 'Escolha o arquivo da planilha (.xlsx) primeiro.' });
+      setMensagemImportacao({ tipo: 'erro', texto: 'Escolha o arquivo da planilha (.xlsx, .xls ou .csv) primeiro.' });
       return;
     }
     setImportando(true);
@@ -189,10 +189,11 @@ export default function ConfiguracoesClient({
       <div className="bg-surface rounded-lg2 border border-border p-5">
         <h2 className="font-display font-bold text-base mb-1">Importar planilha oficial da escola</h2>
         <p className="text-xs text-muted mb-3">
-          Suba aqui o arquivo .xlsx do levantamento (a mesma planilha que sai do e-Estado, com Descrição,
-          Tombamento, Ambiente, Estado de conservação etc.). Ela fica guardada como consulta rápida: na hora de
-          escanear um tombo já cadastrado nela, o sistema mostra a descrição/local oficiais na hora, mesmo se o
-          site do governo estiver fora do ar. Cada nova importação substitui a lista anterior dessa mesma escola.
+          Suba aqui o arquivo do levantamento — aceita .xlsx, .xls ou .csv (a mesma planilha que sai do e-Estado,
+          com Descrição, Tombamento, Ambiente, Estado de conservação etc.). Ela fica guardada como consulta
+          rápida: na hora de escanear um tombo já cadastrado nela, o sistema mostra a descrição/local oficiais na
+          hora, mesmo se o site do governo estiver fora do ar. Cada nova importação substitui a lista anterior
+          dessa mesma escola.
         </p>
 
         <label className="text-xs font-semibold text-muted">Escola/unidade da planilha</label>
@@ -226,10 +227,10 @@ export default function ConfiguracoesClient({
 
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex-1 min-w-[200px] rounded-md2 border border-dashed border-border px-4 py-2.5 text-sm font-semibold hover:bg-surface-2 cursor-pointer text-center">
-            {arquivoPlanilha ? arquivoPlanilha.name : 'Escolher arquivo .xlsx'}
+            {arquivoPlanilha ? arquivoPlanilha.name : 'Escolher arquivo (.xlsx, .xls ou .csv)'}
             <input
               type="file"
-              accept=".xlsx"
+              accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
               onChange={(e) => setArquivoPlanilha(e.target.files?.[0] || null)}
               className="hidden"
             />
