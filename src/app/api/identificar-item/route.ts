@@ -8,10 +8,12 @@ export const runtime = 'nodejs';
 const TAMANHO_MAXIMO = 6 * 1024 * 1024; // 6 MB
 
 /** Recebe a foto do item e devolve uma sugestão curta de descrição (ex:
- *  "Mesa de escritório"), usando IA de visão. Só usuários logados e
- *  aprovados podem chamar. Se a chave da IA não estiver configurada,
- *  devolve descricaoSugerida: null sem erro — a tela trata isso como "sem
- *  sugestão" e segue normal. */
+ *  "Mesa de escritório") e, quando dá pra estimar, um "chute" de medidas
+ *  típicas pra esse tipo de objeto (não é a medida real da peça da foto —
+ *  ver comentário em lib/identificarItem.ts), usando IA de visão. Só
+ *  usuários logados e aprovados podem chamar. Se a chave da IA não
+ *  estiver configurada, devolve descricaoSugerida: null sem erro — a
+ *  tela trata isso como "sem sugestão" e segue normal. */
 export async function POST(request: NextRequest) {
   const supabase = createClient();
   const {
@@ -35,10 +37,18 @@ export async function POST(request: NextRequest) {
   }
 
   const buffer = Buffer.from(await arquivo.arrayBuffer());
-  const descricaoSugerida = await identificarItemNaFoto(buffer.toString('base64'));
+  const identificacao = await identificarItemNaFoto(buffer.toString('base64'));
   // Avisa o front-end se a chave nem está configurada, pra ele poder
   // mostrar isso claramente em vez de simplesmente "não sugeriu nada" — o
   // administrador (ou quem estiver testando) precisa saber que falta
   // configurar a GEMINI_API_KEY, e não achar que a IA "não funcionou".
-  return NextResponse.json({ descricaoSugerida, iaConfigurada: !!process.env.GEMINI_API_KEY });
+  const temAlgumaMedida =
+    !!identificacao && (identificacao.largura != null || identificacao.altura != null || identificacao.profundidade != null);
+  return NextResponse.json({
+    descricaoSugerida: identificacao?.descricao || null,
+    medidasSugeridas: temAlgumaMedida
+      ? { largura: identificacao!.largura, altura: identificacao!.altura, profundidade: identificacao!.profundidade }
+      : null,
+    iaConfigurada: !!process.env.GEMINI_API_KEY
+  });
 }

@@ -73,6 +73,15 @@ export default function LevantamentoClient({
   const [mensagemLeitura, setMensagemLeitura] = useState('');
   const [identificandoItem, setIdentificandoItem] = useState(false);
   const [mensagemIdentificacao, setMensagemIdentificacao] = useState('');
+  // Estimativa de medida "de cabeça" que a IA sugere junto com a descrição,
+  // baseada no tamanho TÍPICO desse tipo de item (não é medir a peça da
+  // foto de verdade) — por isso nunca preenche os campos sozinha, só fica
+  // disponível como sugestão com um botão "Usar" e um aviso bem claro.
+  const [medidasSugeridasIA, setMedidasSugeridasIA] = useState<{
+    largura: number | null;
+    altura: number | null;
+    profundidade: number | null;
+  } | null>(null);
   const [mensagemDescricaoEtiqueta, setMensagemDescricaoEtiqueta] = useState('');
   const [ditando, setDitando] = useState(false);
   const [suportaDitado, setSuportaDitado] = useState(false);
@@ -689,6 +698,7 @@ export default function LevantamentoClient({
   async function identificarItemPelaFoto(arquivo: File) {
     setIdentificandoItem(true);
     setMensagemIdentificacao('Identificando o item na foto com a IA do Google…');
+    setMedidasSugeridasIA(null);
     try {
       const comprimida = await comprimirImagem(arquivo, 900, 0.75);
       const form = new FormData();
@@ -698,6 +708,7 @@ export default function LevantamentoClient({
       if (resp.ok && json.descricaoSugerida) {
         setDescricao((atual) => atual || json.descricaoSugerida);
         setMensagemIdentificacao(`Sugestão automática pela foto (Google IA): "${json.descricaoSugerida}". Confira e ajuste se precisar.`);
+        if (json.medidasSugeridas) setMedidasSugeridasIA(json.medidasSugeridas);
       } else if (resp.ok && json.iaConfigurada === false) {
         // Não é "a foto não deu pra identificar" — é que ninguém configurou
         // a chave da IA ainda. Avisa isso claramente em vez de ficar calado,
@@ -726,6 +737,7 @@ export default function LevantamentoClient({
     if (indice === 0) {
       setMedindoPelaFoto(false);
       reiniciarCalibracao();
+      setMedidasSugeridasIA(null);
     }
   }
 
@@ -824,6 +836,17 @@ export default function LevantamentoClient({
   function fecharFerramentaMedicao() {
     setMedindoPelaFoto(false);
     reiniciarCalibracao();
+  }
+
+  /** Copia a estimativa de tamanho "de cabeça" que a IA sugeriu (baseada
+   *  no tipo do item, não na peça real da foto) pros campos de medida —
+   *  só quando a pessoa toca no botão, nunca sozinha. */
+  function usarMedidasSugeridasIA() {
+    if (!medidasSugeridasIA) return;
+    if (medidasSugeridasIA.largura != null) setMedidaLargura(String(medidasSugeridasIA.largura).replace('.', ','));
+    if (medidasSugeridasIA.altura != null) setMedidaAltura(String(medidasSugeridasIA.altura).replace('.', ','));
+    if (medidasSugeridasIA.profundidade != null) setMedidaProfundidade(String(medidasSugeridasIA.profundidade).replace('.', ','));
+    setMedidasSugeridasIA(null);
   }
 
   /** Sobe as fotos (tombo + primeira foto do item) pro Storage do
@@ -981,6 +1004,7 @@ export default function LevantamentoClient({
     setFotosItemPreview([]);
     setMensagemLeitura('');
     setMensagemIdentificacao('');
+    setMedidasSugeridasIA(null);
     setMensagemDescricaoEtiqueta('');
     setDuplicado(null);
     setPermitirDuplicado(false);
@@ -1590,9 +1614,10 @@ export default function LevantamentoClient({
         <div>
           <label className="text-xs font-semibold text-muted">Medidas do item (opcional)</label>
           <p className="text-xs text-muted mt-0.5 mb-1.5">
-            Meça com uma trena/fita métrica, se tiver à mão. Sem trena, use a régua digital abaixo pra estimar a
-            medida comparando com um objeto de tamanho conhecido (folha A4, cartão etc.) que apareça na foto do
-            item.
+            Meça com uma trena/fita métrica, se tiver à mão. Sem trena, a IA já sugere uma estimativa sozinha
+            assim que você tira a foto do item (baseada no tamanho comum desse tipo de objeto), ou use a régua
+            digital pra estimar comparando com um objeto de tamanho conhecido (folha A4, cartão etc.) que apareça
+            na foto.
           </p>
           <div className="flex gap-2">
             <input
@@ -1620,6 +1645,40 @@ export default function LevantamentoClient({
               className="flex-1 rounded-md2 border border-border px-3 py-2 text-sm outline-none focus:border-accent"
             />
           </div>
+
+          {medidasSugeridasIA && (
+            <div className="bg-accent-soft border border-accent/30 rounded-lg2 p-3 mt-2">
+              <p className="text-xs font-bold text-accent-strong mb-1">📏 Estimativa automática por IA</p>
+              <p className="text-xs text-muted mb-2">
+                A IA reconheceu o item e sugeriu um tamanho típico pra esse tipo de objeto —{' '}
+                <strong>não é a medida real dessa peça específica</strong>, é só um "chute" baseado no que é comum.
+                Se esse item for maior ou menor que o padrão, vai vir errado. Confira antes de usar.
+              </p>
+              <p className="text-sm mb-2">
+                {medidasSugeridasIA.largura != null && <>Largura: <strong>{String(medidasSugeridasIA.largura).replace('.', ',')} cm</strong>{'  '}</>}
+                {medidasSugeridasIA.altura != null && <>Altura: <strong>{String(medidasSugeridasIA.altura).replace('.', ',')} cm</strong>{'  '}</>}
+                {medidasSugeridasIA.profundidade != null && (
+                  <>Profund.: <strong>{String(medidasSugeridasIA.profundidade).replace('.', ',')} cm</strong></>
+                )}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={usarMedidasSugeridasIA}
+                  className="rounded-md2 bg-accent text-white px-3 py-1.5 text-xs font-semibold"
+                >
+                  Usar essa estimativa
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMedidasSugeridasIA(null)}
+                  className="rounded-md2 border border-border px-3 py-1.5 text-xs font-semibold hover:bg-surface"
+                >
+                  Ignorar
+                </button>
+              </div>
+            </div>
+          )}
 
           {!medindoPelaFoto &&
             (fotosItemPreview[0] ? (
